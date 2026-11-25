@@ -5,6 +5,7 @@ import type { MarketCategory, WatchlistQuote } from '../types/market';
 interface WatchlistSidebarProps {
   quotes: WatchlistQuote[];
   selectedSymbol: string;
+  sniperBySymbol?: Record<string, 'BUY' | 'SELL'>;
   onSelectSymbol: (symbol: string) => void;
   isLoading: boolean;
   isMobileOpen: boolean;
@@ -22,6 +23,7 @@ const CATEGORY_FILTERS: Array<'All' | MarketCategory> = [
 export function WatchlistSidebar({
   quotes,
   selectedSymbol,
+  sniperBySymbol = {},
   onSelectSymbol,
   isLoading,
   isMobileOpen,
@@ -29,20 +31,27 @@ export function WatchlistSidebar({
 }: WatchlistSidebarProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<'All' | MarketCategory>('All');
+  const [sniperOnly, setSniperOnly] = useState(false);
+
+  const sniperTotal = useMemo(
+    () => Object.keys(sniperBySymbol).length,
+    [sniperBySymbol]
+  );
 
   const filteredQuotes = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return quotes.filter((item) => {
       const matchesCat =
         categoryFilter === 'All' || item.category === categoryFilter;
+      const matchesSniper = !sniperOnly || Boolean(sniperBySymbol[item.symbol]);
       const matchesSearch =
         !q ||
         item.symbol.toLowerCase().includes(q) ||
         item.name.toLowerCase().includes(q) ||
         item.category.toLowerCase().includes(q);
-      return matchesCat && matchesSearch;
+      return matchesCat && matchesSniper && matchesSearch;
     });
-  }, [quotes, searchQuery, categoryFilter]);
+  }, [quotes, searchQuery, categoryFilter, sniperOnly, sniperBySymbol]);
 
   const handleSelect = (symbol: string) => {
     onSelectSymbol(symbol);
@@ -59,14 +68,29 @@ export function WatchlistSidebar({
               {quotes.length} pairs
             </span>
           </div>
-          <button
-            type="button"
-            onClick={onCloseMobile}
-            aria-label="Close markets list"
-            className="lg:hidden flex h-9 w-9 items-center justify-center rounded-md text-slate-400 hover:bg-slate-800 hover:text-slate-100 cursor-pointer"
-          >
-            <X className="h-4 w-4" aria-hidden="true" />
-          </button>
+          <div className="flex items-center gap-1.5">
+            {sniperTotal > 0 && (
+              <button
+                type="button"
+                onClick={() => setSniperOnly((v) => !v)}
+                className={`rounded px-2 py-1 text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                  sniperOnly
+                    ? 'bg-emerald-600/25 text-emerald-300 border border-emerald-500/40'
+                    : 'bg-slate-800/80 text-emerald-300 hover:bg-slate-800'
+                }`}
+              >
+                {sniperTotal} Sniper
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onCloseMobile}
+              aria-label="Close markets list"
+              className="lg:hidden flex h-9 w-9 items-center justify-center rounded-md text-slate-400 hover:bg-slate-800 hover:text-slate-100 cursor-pointer"
+            >
+              <X className="h-4 w-4" aria-hidden="true" />
+            </button>
+          </div>
         </div>
 
         <div className="relative">
@@ -137,6 +161,7 @@ export function WatchlistSidebar({
           filteredQuotes.map((quote) => {
             const isSelected = quote.symbol === selectedSymbol;
             const isPositive = quote.changePct >= 0;
+            const sniperSide = sniperBySymbol[quote.symbol];
             return (
               <button
                 key={quote.symbol}
@@ -149,13 +174,26 @@ export function WatchlistSidebar({
                 }`}
               >
                 <div className="flex items-baseline justify-between gap-2">
-                  <span
-                    className={`text-sm font-semibold tracking-tight whitespace-nowrap ${
-                      isSelected ? 'text-white' : 'text-slate-200'
-                    }`}
-                  >
-                    {quote.symbol}
-                  </span>
+                  <div className="flex items-baseline gap-2 min-w-0">
+                    <span
+                      className={`text-sm font-semibold tracking-tight whitespace-nowrap ${
+                        isSelected ? 'text-white' : 'text-slate-200'
+                      }`}
+                    >
+                      {quote.symbol}
+                    </span>
+                    {sniperSide && (
+                      <span
+                        className={`text-[11px] font-bold font-mono whitespace-nowrap ${
+                          sniperSide === 'BUY'
+                            ? 'text-emerald-400'
+                            : 'text-rose-400'
+                        }`}
+                      >
+                        · {sniperSide}
+                      </span>
+                    )}
+                  </div>
                   <span className="font-mono tabular-nums text-sm font-medium text-slate-100">
                     {quote.price.toFixed(quote.decimals)}
                   </span>

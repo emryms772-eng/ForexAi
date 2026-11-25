@@ -158,7 +158,7 @@ export function generateLocalMtfSignal(params: {
   const m5Snap = m5Entry.analysis.snapshot;
   const avgRange = Math.max(m5Snap.avgCandleRange, spotPrice * 0.0005);
 
-  // Higher-timeframe bias weights (4H=3, 1H=3, 15M=2)
+  // Strict 4H / 1H / 15M higher-timeframe consensus (zero conflict allowed for Sniper entries)
   let htfBull = 0;
   let htfBear = 0;
   for (const [assess, weight] of [
@@ -171,18 +171,22 @@ export function generateLocalMtfSignal(params: {
     else if (assess.bias === 'Bearish') htfBear += weight;
   }
 
-  const dominantBias: AIPriceActionSignal['bias'] =
-    htfBull >= htfBear + 2
-      ? 'Bullish'
-      : htfBear >= htfBull + 2
-      ? 'Bearish'
-      : a5m?.bias ?? 'Neutral';
-
   const htfConflict =
-    a4h &&
-    a1h &&
-    ((a4h.bias === 'Bullish' && a1h.bias === 'Bearish') ||
-      (a4h.bias === 'Bearish' && a1h.bias === 'Bullish'));
+    (a4h &&
+      a1h &&
+      ((a4h.bias === 'Bullish' && a1h.bias === 'Bearish') ||
+        (a4h.bias === 'Bearish' && a1h.bias === 'Bullish'))) ||
+    (a1h &&
+      a15m &&
+      ((a1h.bias === 'Bullish' && a15m.bias === 'Bearish') ||
+        (a1h.bias === 'Bearish' && a15m.bias === 'Bullish')));
+
+  const dominantBias: AIPriceActionSignal['bias'] =
+    htfBull >= htfBear + 3
+      ? 'Bullish'
+      : htfBear >= htfBull + 3
+      ? 'Bearish'
+      : 'Neutral';
 
   // Inspect 5M triggers & zones on closed bars
   const m5BullZones = m5Entry.analysis.zones.filter(
@@ -194,22 +198,32 @@ export function generateLocalMtfSignal(params: {
 
   const nearBullZone = m5BullZones.find(
     (z) =>
-      spotPrice >= z.low - avgRange * 0.6 && spotPrice <= z.high + avgRange * 1.4
+      spotPrice >= z.low - avgRange * 0.45 && spotPrice <= z.high + avgRange * 1.05
   );
   const nearBearZone = m5BearZones.find(
     (z) =>
-      spotPrice <= z.high + avgRange * 0.6 && spotPrice >= z.low - avgRange * 1.4
+      spotPrice <= z.high + avgRange * 0.45 && spotPrice >= z.low - avgRange * 1.05
   );
 
   const latestPattern = m5Snap.latestPattern;
   const hasBullPattern = latestPattern?.bias === 'Bullish';
   const hasBearPattern = latestPattern?.bias === 'Bearish';
 
+  const bullSweepConfirmed =
+    m5Snap.recentSweep === 'Sell-Side Sweep (Bullish)' ||
+    Boolean(a15m?.note.includes('Sell-Side Sweep'));
+  const bearSweepConfirmed =
+    m5Snap.recentSweep === 'Buy-Side Sweep (Bearish)' ||
+    Boolean(a15m?.note.includes('Buy-Side Sweep'));
+
+  const bullDisplacement = a5m?.lastDisplacementDir === 'Bullish';
+  const bearDisplacement = a5m?.lastDisplacementDir === 'Bearish';
+
   const bullConfirmations: string[] = [];
-  if (m5Snap.recentSweep === 'Sell-Side Sweep (Bullish)' || a15m?.note.includes('Sell-Side Sweep')) {
+  if (bullSweepConfirmed) {
     bullConfirmations.push('Closed-bar sell-side liquidity sweep reclaimed');
   }
-  if (a5m?.lastDisplacementDir === 'Bullish') {
+  if (bullDisplacement) {
     bullConfirmations.push('5M closed-bar bullish displacement & momentum expansion');
   }
   if (hasBullPattern && latestPattern) {
@@ -225,10 +239,10 @@ export function generateLocalMtfSignal(params: {
   }
 
   const bearConfirmations: string[] = [];
-  if (m5Snap.recentSweep === 'Buy-Side Sweep (Bearish)' || a15m?.note.includes('Buy-Side Sweep')) {
+  if (bearSweepConfirmed) {
     bearConfirmations.push('Closed-bar buy-side liquidity sweep rejected');
   }
-  if (a5m?.lastDisplacementDir === 'Bearish') {
+  if (bearDisplacement) {
     bearConfirmations.push('5M closed-bar bearish displacement & momentum expansion');
   }
   if (hasBearPattern && latestPattern) {
@@ -243,78 +257,94 @@ export function generateLocalMtfSignal(params: {
     bearConfirmations.push(`5M ${m5Snap.latestStructureEvent} confirmed`);
   }
 
+  // Strict OTE Discount / Premium Zones for Sniper Entries Only
+  const inSniperDiscount =
+    m5Snap.rangePositionPct <= 40 ||
+    Boolean(nearBullZone && m5Snap.rangePositionPct <= 44);
+  const inSniperPremium =
+    m5Snap.rangePositionPct >= 60 ||
+    Boolean(nearBearZone && m5Snap.rangePositionPct >= 56);
+
+  const bullSniperTrigger =
+    (bullSweepConfirmed || Boolean(nearBullZone)) &&
+    (bullDisplacement || hasBullPattern) &&
+    bullConfirmations.length >= 3;
+
+  const bearSniperTrigger =
+    (bearSweepConfirmed || Boolean(nearBearZone)) &&
+    (bearDisplacement || hasBearPattern) &&
+    bearConfirmations.length >= 3;
+
   let signalAction: 'BUY' | 'SELL' | 'WAIT' = 'WAIT';
   let signalStrength: 'A+ Setup' | 'Standard' | 'Developing' = 'Developing';
-  let setupType = '5M HTF Alignment Watch';
-  let triggerPattern = latestPattern?.name ?? 'Awaiting 5M closed-bar confirmation';
+  let setupType = 'WAIT — No Sniper Setup (Stay Flat)';
+  let triggerPattern = latestPattern?.name ?? 'Awaiting closed 5M sniper trigger';
   let confluences: string[] = [];
-
-  const inDiscount = m5Snap.rangePositionPct <= 45 || Boolean(nearBullZone && m5Snap.rangePositionPct <= 52);
-  const inPremium = m5Snap.rangePositionPct >= 55 || Boolean(nearBearZone && m5Snap.rangePositionPct >= 48);
 
   if (
     !htfConflict &&
     dominantBias === 'Bullish' &&
-    inDiscount &&
-    bullConfirmations.length >= 2
+    inSniperDiscount &&
+    bullSniperTrigger
   ) {
     signalAction = 'BUY';
-    signalStrength = bullConfirmations.length >= 3 ? 'A+ Setup' : 'Standard';
+    signalStrength = 'A+ Setup';
     setupType = nearBullZone
-      ? `HTF Bullish + 5M ${nearBullZone.kind} Mitigation`
-      : 'HTF Bullish + 5M Sell-Side Sweep Reclaim';
+      ? `Sniper HTF Bullish + 5M ${nearBullZone.kind} Mitigation`
+      : 'Sniper HTF Bullish + 5M Sell-Side Sweep Displacement';
     triggerPattern = hasBullPattern && latestPattern
       ? latestPattern.name
-      : '5M Bullish Displacement + Structure Shift';
+      : '5M Sweep + Bullish Displacement BOS';
     confluences = [
-      `4H/1H/15M HTF alignment (${a4h?.bias ?? 'Neutral'} / ${a1h?.bias ?? 'Neutral'} / ${a15m?.bias ?? 'Neutral'})`,
-      `5M in ${m5Snap.rangeZone} (${m5Snap.rangePositionPct}% of dealing range)`,
+      `4H/1H/15M HTF consensus (${a4h?.bias ?? 'Neutral'} / ${a1h?.bias ?? 'Neutral'} / ${a15m?.bias ?? 'Neutral'})`,
+      `5M OTE Discount (${m5Snap.rangePositionPct}% of dealing range)`,
       ...bullConfirmations.slice(0, 2),
     ];
   } else if (
     !htfConflict &&
     dominantBias === 'Bearish' &&
-    inPremium &&
-    bearConfirmations.length >= 2
+    inSniperPremium &&
+    bearSniperTrigger
   ) {
     signalAction = 'SELL';
-    signalStrength = bearConfirmations.length >= 3 ? 'A+ Setup' : 'Standard';
+    signalStrength = 'A+ Setup';
     setupType = nearBearZone
-      ? `HTF Bearish + 5M ${nearBearZone.kind} Mitigation`
-      : 'HTF Bearish + 5M Buy-Side Sweep Rejection';
+      ? `Sniper HTF Bearish + 5M ${nearBearZone.kind} Mitigation`
+      : 'Sniper HTF Bearish + 5M Buy-Side Sweep Displacement';
     triggerPattern = hasBearPattern && latestPattern
       ? latestPattern.name
-      : '5M Bearish Displacement + Structure Shift';
+      : '5M Sweep + Bearish Displacement BOS';
     confluences = [
-      `4H/1H/15M HTF alignment (${a4h?.bias ?? 'Neutral'} / ${a1h?.bias ?? 'Neutral'} / ${a15m?.bias ?? 'Neutral'})`,
-      `5M in ${m5Snap.rangeZone} (${m5Snap.rangePositionPct}% of dealing range)`,
+      `4H/1H/15M HTF consensus (${a4h?.bias ?? 'Neutral'} / ${a1h?.bias ?? 'Neutral'} / ${a15m?.bias ?? 'Neutral'})`,
+      `5M OTE Premium (${m5Snap.rangePositionPct}% of dealing range)`,
       ...bearConfirmations.slice(0, 2),
     ];
   } else {
-    // WAIT with clear conditional watch plan
     const isBullWatch = dominantBias !== 'Bearish';
     setupType = htfConflict
-      ? 'WAIT — HTF 4H/1H Structure Conflict'
+      ? 'WAIT — HTF Conflict (No Sniper)'
+      : dominantBias === 'Neutral'
+      ? 'WAIT — Neutral HTF (Stay Flat)'
       : isBullWatch
-      ? 'WAIT — Watch 5M Discount / Demand OB Entry'
-      : 'WAIT — Watch 5M Premium / Supply OB Entry';
+      ? 'WAIT — Watch 5M Deep Discount Sniper Zone'
+      : 'WAIT — Watch 5M Deep Premium Sniper Zone';
     triggerPattern = isBullWatch
-      ? 'Wait for closed 5M sweep + Bullish Engulfing / Displacement in Discount'
-      : 'Wait for closed 5M sweep + Bearish Engulfing / Displacement in Premium';
+      ? 'Need closed 5M sell-side sweep + displacement in Discount (<=40%)'
+      : 'Need closed 5M buy-side sweep + displacement in Premium (>=60%)';
     confluences = [
       `4H: ${a4h?.bias ?? 'Neutral'} (${a4h?.structureEvent ?? 'Range'}) · 1H: ${a1h?.bias ?? 'Neutral'}`,
-      `5M currently at ${m5Snap.rangePositionPct}% (${m5Snap.rangeZone}) · Buyer pressure ${m5Snap.buyerPressurePct}%`,
+      `5M range ${m5Snap.rangePositionPct}% (${m5Snap.rangeZone}) · Need >=3 sniper confluences`,
       ...(isBullWatch ? bullConfirmations : bearConfirmations).slice(0, 2),
     ];
   }
 
-  // Calibrate realistic 5M Entry / SL / TP1 / TP2
+  // Calibrate tight institutional 5M Sniper Entry / SL / TP1 / TP2
   const planBullish =
     signalAction === 'BUY' ||
     (signalAction === 'WAIT' && dominantBias !== 'Bearish');
 
   let entryPrice = spotPrice;
-  let entryZone = `${roundToDecimals(spotPrice - avgRange * 0.3, d).toFixed(d)}-${roundToDecimals(spotPrice + avgRange * 0.3, d).toFixed(d)}`;
+  let entryZone = `${roundToDecimals(spotPrice - avgRange * 0.25, d).toFixed(d)}-${roundToDecimals(spotPrice + avgRange * 0.25, d).toFixed(d)}`;
   let stopLoss: number;
   let takeProfit1: number;
   let takeProfit2: number;
@@ -327,34 +357,34 @@ export function generateLocalMtfSignal(params: {
         d
       );
       entryZone = `${targetZone.low.toFixed(d)}-${targetZone.high.toFixed(d)}`;
-      stopLoss = roundToDecimals(targetZone.low - avgRange * 0.85, d);
+      stopLoss = roundToDecimals(targetZone.low - avgRange * 0.65, d);
     } else {
       const recentLow = Math.min(
-        ...m5Closed.slice(-8).map((c) => c.low),
+        ...m5Closed.slice(-6).map((c) => c.low),
         nearBullZone?.low ?? spotPrice
       );
       const rawRisk = Math.max(
-        avgRange * 1.4,
-        Math.min(avgRange * 3.8, spotPrice - recentLow + avgRange * 0.5)
+        avgRange * 1.15,
+        Math.min(avgRange * 3.0, spotPrice - recentLow + avgRange * 0.35)
       );
       stopLoss = roundToDecimals(entryPrice - rawRisk, d);
     }
 
-    const risk = Math.max(entryPrice - stopLoss, avgRange * 1.2);
+    const risk = Math.max(entryPrice - stopLoss, avgRange * 1.05);
     stopLoss = roundToDecimals(entryPrice - risk, d);
     const structuralHighTarget = Math.max(
       m5Snap.dealingRangeHigh,
-      entryPrice + risk * 2.5
+      entryPrice + risk * 2.6
     );
     takeProfit1 = roundToDecimals(
-      Math.max(entryPrice + risk * 1.6, m5Snap.equilibriumPrice + avgRange * 0.5),
+      Math.max(entryPrice + risk * 1.6, m5Snap.equilibriumPrice + avgRange * 0.4),
       d
     );
     if (takeProfit1 <= entryPrice) {
       takeProfit1 = roundToDecimals(entryPrice + risk * 1.6, d);
     }
     takeProfit2 = roundToDecimals(
-      Math.max(takeProfit1 + risk * 0.9, structuralHighTarget),
+      Math.max(takeProfit1 + risk * 1.0, structuralHighTarget),
       d
     );
   } else {
@@ -365,40 +395,49 @@ export function generateLocalMtfSignal(params: {
         d
       );
       entryZone = `${targetZone.low.toFixed(d)}-${targetZone.high.toFixed(d)}`;
-      stopLoss = roundToDecimals(targetZone.high + avgRange * 0.85, d);
+      stopLoss = roundToDecimals(targetZone.high + avgRange * 0.65, d);
     } else {
       const recentHigh = Math.max(
-        ...m5Closed.slice(-8).map((c) => c.high),
+        ...m5Closed.slice(-6).map((c) => c.high),
         nearBearZone?.high ?? spotPrice
       );
       const rawRisk = Math.max(
-        avgRange * 1.4,
-        Math.min(avgRange * 3.8, recentHigh - spotPrice + avgRange * 0.5)
+        avgRange * 1.15,
+        Math.min(avgRange * 3.0, recentHigh - spotPrice + avgRange * 0.35)
       );
       stopLoss = roundToDecimals(entryPrice + rawRisk, d);
     }
 
-    const risk = Math.max(stopLoss - entryPrice, avgRange * 1.2);
+    const risk = Math.max(stopLoss - entryPrice, avgRange * 1.05);
     stopLoss = roundToDecimals(entryPrice + risk, d);
     const structuralLowTarget = Math.min(
       m5Snap.dealingRangeLow,
-      entryPrice - risk * 2.5
+      entryPrice - risk * 2.6
     );
     takeProfit1 = roundToDecimals(
-      Math.min(entryPrice - risk * 1.6, m5Snap.equilibriumPrice - avgRange * 0.5),
+      Math.min(entryPrice - risk * 1.6, m5Snap.equilibriumPrice - avgRange * 0.4),
       d
     );
     if (takeProfit1 >= entryPrice) {
       takeProfit1 = roundToDecimals(entryPrice - risk * 1.6, d);
     }
     takeProfit2 = roundToDecimals(
-      Math.min(takeProfit1 - risk * 0.9, structuralLowTarget),
+      Math.min(takeProfit1 - risk * 1.0, structuralLowTarget),
       d
     );
   }
 
   const riskDist = Math.max(Math.abs(entryPrice - stopLoss), 1e-9);
   const rrVal = Math.abs(takeProfit2 - entryPrice) / riskDist;
+
+  // Enforce >= 1:2.4 Sniper R:R threshold (never accept low-R:R trades)
+  if (signalAction !== 'WAIT' && rrVal < 2.4) {
+    signalAction = 'WAIT';
+    signalStrength = 'Developing';
+    setupType = 'WAIT — R:R Below 1:2.4 Sniper Minimum';
+    triggerPattern = 'Insufficient opposing liquidity room for sniper entry';
+  }
+
   const riskRewardRatio = `1 : ${rrVal.toFixed(1)}`;
 
   const invalidationReason = planBullish
@@ -407,8 +446,8 @@ export function generateLocalMtfSignal(params: {
 
   const priceActionNarrative =
     signalAction === 'WAIT'
-      ? `Closed-bar 4H (${a4h?.bias ?? 'Neutral'}) and 1H (${a1h?.bias ?? 'Neutral'}) context puts 5M at ${m5Snap.rangePositionPct}% (${m5Snap.rangeZone}) near ${spotPrice.toFixed(d)}. Waiting for a closed-bar 5M ${planBullish ? 'sell-side sweep & bullish displacement into discount' : 'buy-side sweep & bearish displacement into premium'} near ${entryPrice.toFixed(d)} before entry.`
-      : `Top-down closed-bar structure aligns ${dominantBias} across HTF (4H ${a4h?.structureEvent ?? 'Range'} / 1H ${a1h?.structureEvent ?? 'Range'}) while 5M sits in ${m5Snap.rangeZone} (${m5Snap.rangePositionPct}%). ${bullConfirmations[0] || bearConfirmations[0] || 'Closed-bar 5M displacement'} confirms ${signalAction} execution toward ${takeProfit1.toFixed(d)} and ${takeProfit2.toFixed(d)}.`;
+      ? `Closed-bar 4H (${a4h?.bias ?? 'Neutral'}) and 1H (${a1h?.bias ?? 'Neutral'}) scan puts 5M at ${m5Snap.rangePositionPct}% (${m5Snap.rangeZone}) near ${spotPrice.toFixed(d)}. No A+ sniper entry yet—stay flat until price reaches ${entryPrice.toFixed(d)} and closes a confirmed ${planBullish ? 'sell-side sweep + bullish displacement' : 'buy-side sweep + bearish displacement'}.`
+      : `A+ Sniper confirmed strictly on closed bars: 4H/1H/15M align ${dominantBias} while 5M sits in ${m5Snap.rangeZone} (${m5Snap.rangePositionPct}%). ${bullConfirmations[0] || bearConfirmations[0] || 'Closed-bar 5M displacement'} locks ${signalAction} execution at ${entryPrice.toFixed(d)} targeting ${takeProfit1.toFixed(d)} and ${takeProfit2.toFixed(d)} (${riskRewardRatio}).`;
 
   const topLevels = m5Entry.analysis.levels
     .slice(0, 3)
@@ -437,7 +476,7 @@ export function generateLocalMtfSignal(params: {
     confirmedBarTime,
     confirmedBarCloseTime: confirmedBarTime > 0 ? confirmedBarTime + 300 : 0,
     isLockedToClosedBar: true,
-    model: 'Local MTF (Free Forever)',
+    model: 'Local Sniper MTF (Free Forever)',
     spotPriceAtSignal: spotPrice,
     bias: dominantBias,
     priceActionNarrative,
@@ -458,6 +497,73 @@ export function generateLocalMtfSignal(params: {
       confluences: confluences.slice(0, 4),
     },
   };
+}
+
+/**
+ * Deterministic post-gatekeeper applied to LLM outputs (Gemini/Groq) so weak,
+ * Standard, low-R:R, or HTF-conflicting calls are blocked cleanly into WAIT.
+ */
+export function enforceSniperDiscipline(params: {
+  signal: AIPriceActionSignal;
+  timeframesData: TimeframePriceActionInput[];
+}): AIPriceActionSignal {
+  const { signal, timeframesData } = params;
+  if (signal.plan.signal === 'WAIT') {
+    return signal;
+  }
+
+  const { plan } = signal;
+  const isBuy = plan.signal === 'BUY';
+  const entry = plan.entryPrice > 0 ? plan.entryPrice : signal.spotPriceAtSignal;
+  const sl = plan.stopLoss;
+  const tp1 = plan.takeProfit1;
+  const tp2 = plan.takeProfit2;
+
+  const validGeometry = isBuy
+    ? sl > 0 && sl < entry && tp1 > entry && tp2 > tp1
+    : sl > 0 && sl > entry && tp1 < entry && tp2 < tp1;
+
+  const risk = Math.abs(entry - sl);
+  const reward2 = Math.abs(tp2 - entry);
+  const rr = risk > 0 ? reward2 / risk : 0;
+
+  const byTf = new Map(timeframesData.map((t) => [t.timeframe, t]));
+  const d = getInstrumentBySymbol(signal.symbol).decimals;
+  const a4h = byTf.get('4H') ? assessTimeframe(byTf.get('4H')!, d) : null;
+  const a1h = byTf.get('1H') ? assessTimeframe(byTf.get('1H')!, d) : null;
+  const m5Snap = byTf.get('5M')?.analysis.snapshot;
+
+  const htfOpposes =
+    (isBuy && (a4h?.bias === 'Bearish' || a1h?.bias === 'Bearish')) ||
+    (!isBuy && (a4h?.bias === 'Bullish' || a1h?.bias === 'Bullish'));
+
+  const wrongSideOfRange =
+    m5Snap &&
+    ((isBuy && m5Snap.rangePositionPct > 50) ||
+      (!isBuy && m5Snap.rangePositionPct < 50));
+
+  const weakQuality =
+    plan.signalStrength !== 'A+ Setup' || plan.confluences.length < 3;
+
+  if (!validGeometry || rr < 2.2 || htfOpposes || wrongSideOfRange || weakQuality) {
+    const localStrict = generateLocalMtfSignal({
+      symbol: signal.symbol,
+      activeTimeframe: signal.timeframe,
+      timeframesData,
+    });
+    if (localStrict.plan.signal === 'WAIT') {
+      return {
+        ...localStrict,
+        model: `${signal.model} · Sniper Filtered`,
+      };
+    }
+    return {
+      ...localStrict,
+      model: `${signal.model} · Sniper Calibrated`,
+    };
+  }
+
+  return signal;
 }
 
 /**

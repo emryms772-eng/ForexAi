@@ -318,4 +318,10 @@ export interface AIBacktestReview {
   recommendations: string[];
 }
 
-
+export interface MarketScanResponse {
+  scannedAt: string;
+  confirmedBarTime: number;
+  totalScanned: number;
+  sniperSignals: AIPriceActionSignal[];
+  watchSignals: AIPriceActionSignal[];
+}

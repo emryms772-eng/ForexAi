@@ -9,6 +9,7 @@ import type {
   AIPriceActionSignal,
   BacktestResult,
   MarketCandlesResponse,
+  MarketScanResponse,
   MarketTickEvent,
   OHLCVCandle,
   PriceActionAnalysisSummary,
@@ -237,6 +238,17 @@ export async function requestPriceActionSignal(params: {
       throw new Error(`${serverMessage} Local MTF fallback failed: ${localMessage}`);
     }
   }
+}
+
+export async function requestMarketSniperScan(): Promise<MarketScanResponse> {
+  const res = await fetch('/api/analysis/scan-market', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  return parseJsonSafe<MarketScanResponse>(
+    res,
+    'Failed to run AI market sniper scan'
+  );
 }
 
 export async function requestPriceActionBacktest(params: {

@@ -9,6 +9,7 @@ import { TIMEFRAMES, getInstrumentBySymbol } from './src/config/instruments.ts';
 import {
   generateBacktestReview,
   generatePriceActionSignal,
+  scanMarketSniperSetups,
 } from './src/server/aiAnalysis.ts';
 import {
   advanceMarketTick,
@@ -214,6 +215,23 @@ async function startServer() {
     }
   });
 
+  app.all('/api/analysis/scan-market', async (req, res) => {
+    if (req.method !== 'POST' && req.method !== 'GET') {
+      res.status(405).json({ error: 'Method not allowed' });
+      return;
+    }
+    try {
+      const scan = await scanMarketSniperSetups();
+      res.json(scan);
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unable to complete market sniper scan.';
+      res.status(500).json({ error: message });
+    }
+  });
+
   app.post('/api/analysis/backtest', async (req, res) => {
     try {
       const symbol =
@@ -351,10 +369,36 @@ async function startServer() {
 
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
+    const disableHmr = process.env.DISABLE_HMR === 'true';
     const vite = await createViteServer({
+      plugins: disableHmr
+        ? [
+            {
+              name: 'disable-vite-client-hmr-ws',
+              transform(code, id) {
+                if (
+                  id.includes('vite/dist/client/client.mjs') ||
+                  id.includes('@vite/client')
+                ) {
+                  return code
+                    .replace(
+                      'ws.send(JSON.stringify(data));',
+                      'if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(data));'
+                    )
+                    .replace(
+                      'transport.connect(createHMRHandler(handleMessage));',
+                      '/* WebSocket HMR disabled via DISABLE_HMR=true */'
+                    );
+                }
+                return null;
+              },
+            },
+          ]
+        : [],
       server: {
         middlewareMode: true,
-        hmr: process.env.DISABLE_HMR !== 'true',
+        hmr: !disableHmr,
+        ws: disableHmr ? false : undefined,
       },
       appType: 'spa',
     });

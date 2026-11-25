@@ -10,6 +10,7 @@ import { BacktestPanel } from './components/BacktestPanel';
 import { CandlestickChart } from './components/CandlestickChart';
 import { DemoTradingPanel } from './components/DemoTradingPanel';
 import { LivePriceHeader } from './components/LivePriceHeader';
+import { MarketSniperScanner } from './components/MarketSniperScanner';
 import { MobileBottomNav } from './components/MobileBottomNav';
 import { PriceActionStructureStrip } from './components/PriceActionStructureStrip';
 import { PriceActionZonesPanel } from './components/PriceActionZonesPanel';
@@ -30,6 +31,7 @@ import {
   fetchMarketCandles,
   fetchSmsStatus,
   fetchWatchlistQuotes,
+  requestMarketSniperScan,
   requestPriceActionBacktest,
   requestPriceActionSignal,
   sendSmsSignalAlert,
@@ -43,6 +45,7 @@ import type {
   BacktestResult,
   DemoAccountState,
   FeedOrigin,
+  MarketScanResponse,
   OHLCVCandle,
   SmsConfigStatus,
   Timeframe,
@@ -99,6 +102,10 @@ export default function App() {
   const [smsStatus, setSmsStatus] = useState<SmsConfigStatus | null>(null);
   const [smsSending, setSmsSending] = useState<boolean>(false);
 
+  const [marketScan, setMarketScan] = useState<MarketScanResponse | null>(null);
+  const [isMarketScanning, setIsMarketScanning] = useState<boolean>(false);
+  const [marketScanError, setMarketScanError] = useState<string | null>(null);
+
   const candlesRef = useRef<OHLCVCandle[]>([]);
   candlesRef.current = candles;
   const watchlistRef = useRef<WatchlistQuote[]>([]);
@@ -107,6 +114,12 @@ export default function App() {
   livePriceRef.current = livePrice;
   const isAnalyzingRef = useRef<boolean>(false);
   isAnalyzingRef.current = isAnalyzing;
+  const isMarketScanningRef = useRef<boolean>(false);
+  isMarketScanningRef.current = isMarketScanning;
+  const lastMarketScanBarRef = useRef<number>(0);
+  const smsAlertedIdsRef = useRef<Set<string>>(new Set());
+  const selectedSymbolRef = useRef<string>(selectedSymbol);
+  selectedSymbolRef.current = selectedSymbol;
   const demoConfigRef = useRef<AutoTradeConfig>(demoAccount.config);
   demoConfigRef.current = demoAccount.config;
   const smsStatusRef = useRef<SmsConfigStatus | null>(null);
@@ -466,6 +479,120 @@ export default function App() {
     void runSignalScan(selectedSymbol, timeframe, false);
   }, [runSignalScan, selectedSymbol, timeframe]);
 
+  const runMarketSniperScan = useCallback(async (isAutoTrigger = false) => {
+    if (isMarketScanningRef.current) return;
+    setIsMarketScanning(true);
+    setMarketScanError(null);
+
+    try {
+      const scan = await requestMarketSniperScan();
+      setMarketScan(scan);
+      if (scan.confirmedBarTime > 0) {
+        lastMarketScanBarRef.current = scan.confirmedBarTime;
+      }
+
+      if (scan.sniperSignals.length > 0) {
+        setSignalHistory((prev) => {
+          const merged = [...scan.sniperSignals, ...prev];
+          const seen = new Set<string>();
+          return merged
+            .filter((item) => {
+              if (seen.has(item.id)) return false;
+              seen.add(item.id);
+              return true;
+            })
+            .slice(0, 20);
+        });
+      }
+
+      const allFromScan = [...scan.sniperSignals, ...scan.watchSignals];
+      const currentSym = selectedSymbolRef.current;
+      const matchingSelected = allFromScan.find((s) => s.symbol === currentSym);
+      if (matchingSelected) {
+        setActiveSignal((prev) => {
+          if (
+            prev &&
+            prev.symbol === currentSym &&
+            prev.confirmedBarTime >= matchingSelected.confirmedBarTime &&
+            !prev.model.startsWith('Local')
+          ) {
+            return prev;
+          }
+          return matchingSelected;
+        });
+      }
+
+      if (demoConfigRef.current.autoTradeEnabled && scan.sniperSignals.length > 0) {
+        setDemoAccount((prev) => {
+          if (!prev.config.autoTradeEnabled) return prev;
+          let nextState = prev;
+          let note: string | null = null;
+          for (const sniperSig of scan.sniperSignals) {
+            const spot =
+              sniperSig.symbol === currentSym
+                ? livePriceRef.current || sniperSig.spotPriceAtSignal
+                : watchlistRef.current.find((q) => q.symbol === sniperSig.symbol)
+                    ?.price ?? sniperSig.spotPriceAtSignal;
+            const res = executeSignalInDemoAccount(nextState, sniperSig, spot);
+            if (res.nextState !== nextState) {
+              note = res.actionSummary;
+            }
+            nextState = res.nextState;
+          }
+          if (note) setLastExecutionNote(note);
+          return nextState;
+        });
+      }
+
+      if (
+        isAutoTrigger &&
+        demoConfigRef.current.smsAlertsEnabled &&
+        smsStatusRef.current?.configured &&
+        scan.sniperSignals.length > 0
+      ) {
+        for (const sniperSig of scan.sniperSignals) {
+          if (smsAlertedIdsRef.current.has(sniperSig.id)) continue;
+          smsAlertedIdsRef.current.add(sniperSig.id);
+          try {
+            const smsRes = await sendSmsSignalAlert(sniperSig);
+            if (smsRes.sent) {
+              setLastExecutionNote(
+                `Sniper SMS sent: ${sniperSig.symbol} (${sniperSig.plan.signal} 5M).`
+              );
+            }
+          } catch {
+            // Non-blocking SMS alert failure
+          }
+        }
+      }
+    } catch (err) {
+      setMarketScanError(
+        err instanceof Error ? err.message : 'Unable to scan markets.'
+      );
+    } finally {
+      setIsMarketScanning(false);
+    }
+  }, []);
+
+  // Automatically scan all 14 markets on initial load and whenever a new 5M bar closes
+  useEffect(() => {
+    void runMarketSniperScan(false);
+
+    const closeWatcher = setInterval(() => {
+      if (isMarketScanningRef.current) return;
+      const { bucketStartSec } = getCandleProgress('5M');
+      const latestClosed5m = bucketStartSec - 300;
+      if (
+        lastMarketScanBarRef.current > 0 &&
+        latestClosed5m > lastMarketScanBarRef.current
+      ) {
+        void runMarketSniperScan(true);
+      }
+    }, 2500);
+
+    return () => clearInterval(closeWatcher);
+  }, [runMarketSniperScan]);
+
   const handleSendSignalToSms = useCallback(
     async (sig: AIPriceActionSignal) => {
       if (smsSending) return;
@@ -633,23 +760,41 @@ export default function App() {
 
   const displayPrice = livePrice || instrument.basePrice;
 
+  const sniperBySymbol = useMemo(() => {
+    const map: Record<string, 'BUY' | 'SELL'> = {};
+    for (const sig of marketScan?.sniperSignals ?? []) {
+      if (sig.plan.signal === 'BUY' || sig.plan.signal === 'SELL') {
+        map[sig.symbol] = sig.plan.signal;
+      }
+    }
+    return map;
+  }, [marketScan]);
+
   return (
     <div className="min-h-screen bg-[#0B0F17] text-slate-100 flex flex-col">
       <TopNavBar
         activeSection={activeSection}
         openPositionCount={demoAccount.openPositions.length}
         onNavigate={handleNavigate}
-        onGenerateSignal={handleGenerateSignal}
-        isAnalyzing={isAnalyzing}
+        onGenerateSignal={() => void runMarketSniperScan(false)}
+        isAnalyzing={isAnalyzing || isMarketScanning}
       />
 
       <div className="mx-auto flex w-full max-w-[1600px] flex-1 flex-col lg:flex-row">
         <WatchlistSidebar
           quotes={watchlist}
           selectedSymbol={selectedSymbol}
+          sniperBySymbol={sniperBySymbol}
           onSelectSymbol={(sym) => {
             setSelectedSymbol(sym);
             setAiError(null);
+            const fromScan = [
+              ...(marketScan?.sniperSignals ?? []),
+              ...(marketScan?.watchSignals ?? []),
+            ].find((s) => s.symbol === sym);
+            if (fromScan) {
+              setActiveSignal(fromScan);
+            }
           }}
           isLoading={watchlistLoading}
           isMobileOpen={isMobileMarketsOpen}
@@ -677,7 +822,29 @@ export default function App() {
             )}
 
             {activeSection === 'workspace' && (
-              <div className="grid grid-cols-1 gap-4 sm:gap-5 xl:grid-cols-12 items-start">
+              <>
+                <MarketSniperScanner
+                  scan={marketScan}
+                  isScanning={isMarketScanning}
+                  error={marketScanError}
+                  selectedSymbol={selectedSymbol}
+                  watchlist={watchlist}
+                  smsConfigured={Boolean(smsStatus?.configured)}
+                  smsSending={smsSending}
+                  onScanMarket={() => void runMarketSniperScan(false)}
+                  onSelectSignal={(sig) => {
+                    setSelectedSymbol(sig.symbol);
+                    setTimeframe('5M');
+                    setActiveSignal(sig);
+                    setAiError(null);
+                  }}
+                  onExecuteOnDemo={(sig, spotOverride) =>
+                    handleExecuteSignalOnDemo(sig, spotOverride)
+                  }
+                  onSendSms={handleSendSignalToSms}
+                />
+
+                <div className="grid grid-cols-1 gap-4 sm:gap-5 xl:grid-cols-12 items-start">
                 <div className="space-y-4 xl:col-span-8">
                   <CandlestickChart
                     symbol={selectedSymbol}
@@ -718,6 +885,7 @@ export default function App() {
                   />
                 </div>
               </div>
+              </>
             )}
 
             {activeSection === 'demo' && (

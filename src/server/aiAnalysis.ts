@@ -1,5 +1,6 @@
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import {
+  enforceSniperDiscipline,
   generateLocalBacktestReview,
   generateLocalMtfSignal,
 } from '../analysis/localSignalEngine.ts';
@@ -15,11 +16,14 @@ import {
   normalizeSignalResult,
   parseJsonFromModelText,
 } from '../analysis/mtfPrompt.ts';
-import { getInstrumentBySymbol } from '../config/instruments.ts';
+import { analyzePriceAction, getCandleProgress } from '../analysis/priceAction.ts';
+import { MARKET_INSTRUMENTS, getInstrumentBySymbol } from '../config/instruments.ts';
+import { getMarketCandles } from './marketData.ts';
 import type {
   AIBacktestReview,
   AIPriceActionSignal,
   BacktestResult,
+  MarketScanResponse,
   Timeframe,
 } from '../types/market.ts';
 
@@ -487,15 +491,18 @@ export async function generatePriceActionSignal(params: {
     }
   }
 
-  // Unlimited, 100% Free Forever closed-bar MTF price-action fallback
+  // Unlimited, 100% Free Forever closed-bar MTF Sniper price-action fallback + strict Sniper gatekeeper
   const signal = parsed
-    ? normalizeSignalResult({
-        parsed,
-        symbol: instrument.symbol,
-        activeTimeframe,
-        currentPrice,
-        confirmedBarTime,
-        model: usedModel,
+    ? enforceSniperDiscipline({
+        signal: normalizeSignalResult({
+          parsed,
+          symbol: instrument.symbol,
+          activeTimeframe,
+          currentPrice,
+          confirmedBarTime,
+          model: usedModel,
+        }),
+        timeframesData,
       })
     : generateLocalMtfSignal({
         symbol: instrument.symbol,
@@ -503,7 +510,7 @@ export async function generatePriceActionSignal(params: {
         timeframesData,
       });
 
-  if (signalCache.size > 40) {
+  if (signalCache.size > 60) {
     const oldestKey = signalCache.keys().next().value;
     if (oldestKey) signalCache.delete(oldestKey);
   }
@@ -515,6 +522,132 @@ export async function generatePriceActionSignal(params: {
   });
 
   return signal;
+}
+
+let cachedMarketScan: {
+  confirmedBarTime: number;
+  createdAt: number;
+  result: MarketScanResponse;
+} | null = null;
+
+function scoreWatchProximity(sig: AIPriceActionSignal): number {
+  const spot = Math.max(sig.spotPriceAtSignal, 1e-9);
+  const entry = sig.plan.entryPrice > 0 ? sig.plan.entryPrice : spot;
+  const distPct = (Math.abs(spot - entry) / spot) * 100;
+  const alignedBonus = sig.bias !== 'Neutral' ? 10 : 0;
+  const conflictPenalty = sig.plan.setupType.includes('Conflict') ? -15 : 0;
+  return alignedBonus + conflictPenalty - distPct * 4 + sig.plan.confluences.length;
+}
+
+/**
+ * Scans all market instruments across 4H–1M strictly on closed bars for A+ Sniper Entries only.
+ * Results are locked to the latest closed 5M candle timestamp so the scan never repaints mid-bar.
+ */
+export async function scanMarketSniperSetups(): Promise<MarketScanResponse> {
+  const { bucketStartSec } = getCandleProgress('5M');
+  const expectedClosed5m = bucketStartSec - 300;
+
+  if (
+    cachedMarketScan &&
+    cachedMarketScan.confirmedBarTime >= expectedClosed5m &&
+    Date.now() - cachedMarketScan.createdAt < SIGNAL_CACHE_TTL_MS
+  ) {
+    return cachedMarketScan.result;
+  }
+
+  const orderedTfs: Timeframe[] = ['4H', '1H', '15M', '5M', '1M'];
+  const allSignals: AIPriceActionSignal[] = [];
+  const batchSize = 5;
+
+  for (let i = 0; i < MARKET_INSTRUMENTS.length; i += batchSize) {
+    const batch = MARKET_INSTRUMENTS.slice(i, i + batchSize);
+    const batchResults = await Promise.all(
+      batch.map(async (instrument) => {
+        const timeframesData: TimeframePriceActionInput[] = await Promise.all(
+          orderedTfs.map(async (tf) => {
+            const targetLimit = tf === '5M' ? 240 : 200;
+            const data = await getMarketCandles(instrument.symbol, tf, targetLimit);
+            return {
+              timeframe: tf,
+              candles: data.candles,
+              analysis: analyzePriceAction(data.candles, instrument.decimals, {
+                timeframe: tf,
+              }),
+            };
+          })
+        );
+
+        const m5Entry =
+          timeframesData.find((t) => t.timeframe === '5M') ?? timeframesData[0];
+        const m5Closed = m5Entry.candles.filter((c) => c.time < bucketStartSec);
+        const barTime =
+          m5Closed[m5Closed.length - 1]?.time ?? expectedClosed5m;
+        const cacheKey = `${instrument.symbol}:${barTime}`;
+        const existing = signalCache.get(cacheKey);
+        if (
+          existing &&
+          Date.now() - existing.createdAt < SIGNAL_CACHE_TTL_MS
+        ) {
+          return existing.signal;
+        }
+
+        const sniperSig = generateLocalMtfSignal({
+          symbol: instrument.symbol,
+          activeTimeframe: '5M',
+          timeframesData,
+        });
+
+        if (sniperSig.plan.signal !== 'WAIT') {
+          if (signalCache.size > 60) {
+            const oldestKey = signalCache.keys().next().value;
+            if (oldestKey) signalCache.delete(oldestKey);
+          }
+          signalCache.set(cacheKey, {
+            createdAt: Date.now(),
+            confirmedBarTime: sniperSig.confirmedBarTime || barTime,
+            signal: sniperSig,
+          });
+        }
+
+        return sniperSig;
+      })
+    );
+    allSignals.push(...batchResults);
+  }
+
+  const parseRr = (s: string): number => {
+    const m = String(s).match(/:\s*(\d+(?:\.\d+)?)/);
+    return m ? Number(m[1]) : 0;
+  };
+
+  const sniperSignals = allSignals
+    .filter((s) => s.plan.signal === 'BUY' || s.plan.signal === 'SELL')
+    .sort((a, b) => parseRr(b.plan.riskRewardRatio) - parseRr(a.plan.riskRewardRatio));
+
+  const watchSignals = allSignals
+    .filter((s) => s.plan.signal === 'WAIT')
+    .sort((a, b) => scoreWatchProximity(b) - scoreWatchProximity(a));
+
+  const confirmedBarTime =
+    sniperSignals[0]?.confirmedBarTime ||
+    watchSignals[0]?.confirmedBarTime ||
+    expectedClosed5m;
+
+  const result: MarketScanResponse = {
+    scannedAt: new Date().toISOString(),
+    confirmedBarTime,
+    totalScanned: allSignals.length,
+    sniperSignals,
+    watchSignals,
+  };
+
+  cachedMarketScan = {
+    confirmedBarTime,
+    createdAt: Date.now(),
+    result,
+  };
+
+  return result;
 }
 
 async function runGeminiBacktestReview(

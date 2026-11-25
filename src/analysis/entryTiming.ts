@@ -92,11 +92,11 @@ export function evaluateSignalEntryTiming(params: {
     ) {
       return {
         decision: 'INVALIDATED',
-        headline: 'DO NOT ENTER — Stop Loss Invalidated',
-        detail: `Live price (${price.toFixed(d)}) crossed past structural SL (${plan.stopLoss.toFixed(
+        headline: 'ABORT — Sniper Stop Invalidated',
+        detail: `Live price (${price.toFixed(d)}) broke past structural SL (${plan.stopLoss.toFixed(
           d
-        )}). Wait ${countdown} for the current ${execTf} candle to close before rescanning.`,
-        closeCondition: `Invalidated below/above ${plan.stopLoss.toFixed(
+        )}). Stay out and wait ${countdown} for the ${execTf} close before rescanning.`,
+        closeCondition: `Invalidated beyond ${plan.stopLoss.toFixed(
           d
         )} · Next ${execTf} close in ${countdown}`,
         candleCloseTime: progress.nextCloseSec,
@@ -111,15 +111,15 @@ export function evaluateSignalEntryTiming(params: {
       if (tp1Dist > 0 && progressTowardTp1 >= tp1Dist * 0.65) {
         return {
           decision: 'MISSED',
-          headline: 'DO NOT CHASE — Price Already Near TP1',
+          headline: 'DO NOT CHASE — Sniper Entry Missed',
           detail: `Live price (${price.toFixed(
             d
-          )}) has already covered most of the move toward TP1 (${plan.takeProfit1.toFixed(
+          )}) already ran over 65% toward TP1 (${plan.takeProfit1.toFixed(
             d
-          )}). Wait for a clean pullback into ${zone.low.toFixed(
+          )}). Never chase—wait for a retest of ${zone.low.toFixed(
             d
-          )}–${zone.high.toFixed(d)} or the next closed ${execTf} setup.`,
-          closeCondition: `Chasing here ruins R:R · Next ${execTf} bar closes in ${countdown}`,
+          )}–${zone.high.toFixed(d)} or the next closed ${execTf} sniper setup.`,
+          closeCondition: `R:R compromised · Next ${execTf} close in ${countdown}`,
           candleCloseTime: progress.nextCloseSec,
           candleTimeframe: execTf,
         };
@@ -128,37 +128,37 @@ export function evaluateSignalEntryTiming(params: {
 
     // 3. Check if price stretched outside entry window OR current forming bar is fighting direction
     const stretchedBeyondEntry = isBuy
-      ? price > Math.max(zone.high, entryRef) + riskDist * 0.38
-      : price < Math.min(zone.low, entryRef) - riskDist * 0.38;
+      ? price > Math.max(zone.high, entryRef) + riskDist * 0.35
+      : price < Math.min(zone.low, entryRef) - riskDist * 0.35;
 
     const strongCounterForming =
       formingCandle &&
       (isBuy
         ? formingCandle.close < formingCandle.open &&
-          formingCandle.open - formingCandle.close >= riskDist * 0.42
+          formingCandle.open - formingCandle.close >= riskDist * 0.4
         : formingCandle.close > formingCandle.open &&
-          formingCandle.close - formingCandle.open >= riskDist * 0.42);
+          formingCandle.close - formingCandle.open >= riskDist * 0.4);
 
     if (stretchedBeyondEntry || strongCounterForming) {
       return {
         decision: 'WAIT_CANDLE_CLOSE',
-        headline: `WAIT FOR ${execTf} CANDLE CLOSE (${countdown})`,
+        headline: `WAIT FOR ${execTf} CLOSE (${countdown}) — DO NOT FORCE`,
         detail: strongCounterForming
-          ? `The ${closedLabel} bar confirmed ${plan.signal}, but the currently forming ${execTf} candle is pulling back strongly. Wait ${countdown} for it to close above/below ${entryRef.toFixed(
+          ? `The ${closedLabel} sniper bar confirmed ${plan.signal}, but the forming ${execTf} bar is pulling back hard. Wait ${countdown} for candle close confirmation at ${entryRef.toFixed(
               d
-            )} to verify momentum holds.`
+            )}.`
           : `Live price (${price.toFixed(
               d
-            )}) moved slightly past the ideal ${entryRef.toFixed(
+            )}) stretched outside the ${entryRef.toFixed(
               d
-            )} entry. Wait ${countdown} for the ${execTf} candle close or a pullback into ${zone.low.toFixed(
+            )} sniper zone. Wait ${countdown} for ${execTf} close or pullback into ${zone.low.toFixed(
               d
             )}–${zone.high.toFixed(d)}.`,
         closeCondition: isBuy
-          ? `Confirm entry if ${execTf} bar closes bullish near ${zone.low.toFixed(
+          ? `Enter only if ${execTf} closes bullish near ${zone.low.toFixed(
               d
             )}–${zone.high.toFixed(d)} above ${plan.stopLoss.toFixed(d)}`
-          : `Confirm entry if ${execTf} bar closes bearish near ${zone.low.toFixed(
+          : `Enter only if ${execTf} closes bearish near ${zone.low.toFixed(
               d
             )}–${zone.high.toFixed(d)} below ${plan.stopLoss.toFixed(d)}`,
         candleCloseTime: progress.nextCloseSec,
@@ -166,22 +166,22 @@ export function evaluateSignalEntryTiming(params: {
       };
     }
 
-    // 4. Closed-bar confirmed AND live price is inside/near entry window -> ENTER NOW
+    // 4. Closed-bar confirmed AND live price is inside sniper entry window -> FIRE NOW
     return {
       decision: 'ENTER_NOW',
-      headline: `ENTER NOW — ${plan.signal} Confirmed on Closed ${execTf} Bar`,
-      detail: `Confirmed on the ${closedLabel} closed ${execTf} candle (non-repainting). Live price (${price.toFixed(
+      headline: `FIRE ${plan.signal} NOW — Sniper Confirmed on Closed ${execTf} Bar`,
+      detail: `Zero second thoughts: ${closedLabel} closed ${execTf} bar locked all A+ sniper confluences (non-repainting). Price (${price.toFixed(
         d
-      )}) is inside the valid entry window (${zone.low.toFixed(
+      )}) is inside the sniper entry window (${zone.low.toFixed(
         d
-      )}–${zone.high.toFixed(d)}) with SL at ${plan.stopLoss.toFixed(d)}.`,
-      closeCondition: `Closed-bar confirmation locked · Next ${execTf} bar closes in ${countdown}`,
+      )}–${zone.high.toFixed(d)}) with SL ${plan.stopLoss.toFixed(d)}.`,
+      closeCondition: `Locked closed bar · Non-repainting · Next ${execTf} close in ${countdown}`,
       candleCloseTime: progress.nextCloseSec,
       candleTimeframe: execTf,
     };
   }
 
-  // Signal is WAIT — determine whether setup is actively forming right now (WAIT FOR CANDLE CLOSE) or still away (STAY OUT)
+  // Signal is WAIT — determine whether setup is actively forming right now (WAIT FOR CANDLE CLOSE) or stay flat
   const isBullWatch = signal.bias !== 'Bearish';
   const watchDist = Math.abs(price - entryRef);
   const inOrTestingZone =
@@ -195,19 +195,19 @@ export function evaluateSignalEntryTiming(params: {
   if (inOrTestingZone) {
     return {
       decision: 'WAIT_CANDLE_CLOSE',
-      headline: `WAIT FOR ${execTf} CANDLE CLOSE (${countdown})`,
+      headline: `SNIPER FORMING — WAIT ${countdown} FOR ${execTf} CLOSE`,
       detail: `Price (${price.toFixed(
         d
-      )}) is testing the ${execTf} watch zone (${zone.low.toFixed(
+      )}) is testing the ${execTf} sniper OTE zone (${zone.low.toFixed(
         d
       )}–${zone.high.toFixed(
         d
-      )}) right now, but the candle has NOT closed yet. Do not enter early—wait ${countdown} for the ${execTf} close to confirm so you avoid a wick fakeout.`,
+      )}), but the bar has NOT closed yet. Wait ${countdown} for the closed candle so you never enter on a wick fakeout.`,
       closeCondition: isBullWatch
-        ? `Enter BUY only after ${execTf} candle closes bullish inside/above ${entryRef.toFixed(
+        ? `Fires BUY only after ${execTf} closes bullish inside/above ${entryRef.toFixed(
             d
           )} holding ${plan.stopLoss.toFixed(d)}`
-        : `Enter SELL only after ${execTf} candle closes bearish inside/below ${entryRef.toFixed(
+        : `Fires SELL only after ${execTf} closes bearish inside/below ${entryRef.toFixed(
             d
           )} holding ${plan.stopLoss.toFixed(d)}`,
       candleCloseTime: progress.nextCloseSec,
@@ -217,15 +217,13 @@ export function evaluateSignalEntryTiming(params: {
 
   return {
     decision: 'WAIT_FOR_SETUP',
-    headline: 'STAY OUT — Wait for Zone & Candle Close',
-    detail: `Live price (${price.toFixed(
+    headline: 'NO SNIPER ENTRY — STAY FLAT',
+    detail: `No A+ sniper confirmation on this closed ${execTf} bar (${price.toFixed(
       d
-    )}) has not reached the confirmed ${execTf} trigger zone (${zone.low.toFixed(
+    )}). Stay completely flat until price reaches ${zone.low.toFixed(
       d
-    )}–${zone.high.toFixed(
-      d
-    )}) or 4H/1H bias is conflicted. Stay patient until price reaches the zone and closes a ${execTf} confirmation candle.`,
-    closeCondition: `Next ${execTf} candle close in ${countdown} · Re-evaluates automatically on candle close`,
+    )}–${zone.high.toFixed(d)} with aligned 4H/1H structure and closes a ${execTf} confirmation bar.`,
+    closeCondition: `Next ${execTf} bar close in ${countdown} · Auto-rescans on close`,
     candleCloseTime: progress.nextCloseSec,
     candleTimeframe: execTf,
   };
