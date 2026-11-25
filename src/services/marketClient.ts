@@ -199,7 +199,9 @@ export async function requestPriceActionSignal(params: {
             return {
               timeframe: tf,
               candles: params.candles,
-              analysis: analyzePriceAction(params.candles, instrument.decimals),
+              analysis: analyzePriceAction(params.candles, instrument.decimals, {
+                timeframe: tf,
+              }),
             };
           }
           const loaded = await fetchMarketCandles(

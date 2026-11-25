@@ -7,7 +7,10 @@ import type {
   TimeframeAlignmentItem,
 } from '../types/market.ts';
 import type { TimeframePriceActionInput } from './mtfPrompt.ts';
-import { extractHistoricalPriceActionTimeline } from './priceAction.ts';
+import {
+  extractHistoricalPriceActionTimeline,
+  getClosedCandlesForTimeframe,
+} from './priceAction.ts';
 
 function roundToDecimals(value: number, decimals: number): number {
   const factor = Math.pow(10, decimals);
@@ -32,11 +35,12 @@ function assessTimeframe(
   input: TimeframePriceActionInput,
   decimals: number
 ): TimeframeAssessment {
-  const closed =
-    input.candles.length > 10 ? input.candles.slice(0, -1) : input.candles;
+  const closed = getClosedCandlesForTimeframe(input.candles, input.timeframe);
   const lastClosedClose = closed[closed.length - 1]?.close ?? 0;
   const snap = input.analysis.snapshot;
-  const timeline = extractHistoricalPriceActionTimeline(input.candles, decimals);
+  const timeline = extractHistoricalPriceActionTimeline(input.candles, decimals, {
+    timeframe: input.timeframe,
+  });
 
   let bullScore = 0;
   let bearScore = 0;
@@ -141,12 +145,11 @@ export function generateLocalMtfSignal(params: {
   const a1h = getAssess('1H');
   const a15m = getAssess('15M');
   const a5m = getAssess('5M');
-  const a1m = getAssess('1M');
 
   const m5Entry = byTf.get('5M') ?? byTf.get(activeTimeframe) ?? timeframesData[0];
-  const m5Closed =
-    m5Entry.candles.length > 10 ? m5Entry.candles.slice(0, -1) : m5Entry.candles;
+  const m5Closed = getClosedCandlesForTimeframe(m5Entry.candles, '5M');
   const lastClosed = m5Closed[m5Closed.length - 1];
+  const confirmedBarTime = lastClosed?.time ?? 0;
   const spotPrice = roundToDecimals(
     lastClosed?.close ?? instrument.basePrice,
     d
@@ -206,8 +209,8 @@ export function generateLocalMtfSignal(params: {
   if (m5Snap.recentSweep === 'Sell-Side Sweep (Bullish)' || a15m?.note.includes('Sell-Side Sweep')) {
     bullConfirmations.push('Closed-bar sell-side liquidity sweep reclaimed');
   }
-  if (a5m?.lastDisplacementDir === 'Bullish' || a1m?.lastDisplacementDir === 'Bullish') {
-    bullConfirmations.push('Bullish closed-bar displacement & momentum expansion');
+  if (a5m?.lastDisplacementDir === 'Bullish') {
+    bullConfirmations.push('5M closed-bar bullish displacement & momentum expansion');
   }
   if (hasBullPattern && latestPattern) {
     bullConfirmations.push(`5M ${latestPattern.name} trigger`);
@@ -225,8 +228,8 @@ export function generateLocalMtfSignal(params: {
   if (m5Snap.recentSweep === 'Buy-Side Sweep (Bearish)' || a15m?.note.includes('Buy-Side Sweep')) {
     bearConfirmations.push('Closed-bar buy-side liquidity sweep rejected');
   }
-  if (a5m?.lastDisplacementDir === 'Bearish' || a1m?.lastDisplacementDir === 'Bearish') {
-    bearConfirmations.push('Bearish closed-bar displacement & momentum expansion');
+  if (a5m?.lastDisplacementDir === 'Bearish') {
+    bearConfirmations.push('5M closed-bar bearish displacement & momentum expansion');
   }
   if (hasBearPattern && latestPattern) {
     bearConfirmations.push(`5M ${latestPattern.name} trigger`);
@@ -426,11 +429,14 @@ export function generateLocalMtfSignal(params: {
   }));
 
   return {
-    id: `sig-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    id: `sig-${instrument.symbol.replace('/', '')}-${confirmedBarTime || Date.now()}`,
     symbol: instrument.symbol,
     timeframe: activeTimeframe,
     signalTimeframe: '5M',
     analyzedAt: new Date().toISOString(),
+    confirmedBarTime,
+    confirmedBarCloseTime: confirmedBarTime > 0 ? confirmedBarTime + 300 : 0,
+    isLockedToClosedBar: true,
     model: 'Local MTF (Free Forever)',
     spotPriceAtSignal: spotPrice,
     bias: dominantBias,

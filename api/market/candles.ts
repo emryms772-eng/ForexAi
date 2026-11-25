@@ -46,7 +46,9 @@ export default async function handler(
     const limit = Math.min(Math.max(Number.isFinite(rawLimit) ? rawLimit : 180, 40), 300);
 
     const data = await getMarketCandles(symbol, timeframe, limit);
-    const priceAction = analyzePriceAction(data.candles, data.decimals);
+    const priceAction = analyzePriceAction(data.candles, data.decimals, {
+      timeframe,
+    });
     res.status(200).json({ ...data, priceAction });
   } catch (error) {
     const message =

@@ -54,7 +54,9 @@ async function startServer() {
       const enriched = await Promise.all(
         quotes.map(async (q) => {
           const data = await getMarketCandles(q.symbol, '5M', 120);
-          const pa = analyzePriceAction(data.candles, q.decimals);
+          const pa = analyzePriceAction(data.candles, q.decimals, {
+            timeframe: '5M',
+          });
           return {
             ...q,
             structureHint: pa.snapshot.latestStructureEvent,
@@ -78,7 +80,9 @@ async function startServer() {
       const limit = Math.min(Math.max(Number(req.query.limit) || 180, 40), 300);
 
       const data = await getMarketCandles(symbol, timeframe, limit);
-      const priceAction = analyzePriceAction(data.candles, data.decimals);
+      const priceAction = analyzePriceAction(data.candles, data.decimals, {
+        timeframe,
+      });
       res.json({ ...data, priceAction });
     } catch (error) {
       const message =
@@ -166,15 +170,23 @@ async function startServer() {
       const timeframesData = await Promise.all(
         orderedTfs.map(async (tf) => {
           const targetLimit = tf === '5M' ? 240 : 200;
+          const serverData = await getMarketCandles(
+            instrument.symbol,
+            tf,
+            targetLimit
+          );
           const candles =
-            tf === activeTimeframe && clientCandles.length >= 180
+            serverData.candles.length >= 40
+              ? serverData.candles
+              : tf === activeTimeframe && clientCandles.length >= 40
               ? clientCandles
-              : (await getMarketCandles(instrument.symbol, tf, targetLimit))
-                  .candles;
+              : serverData.candles;
           return {
             timeframe: tf,
             candles,
-            analysis: analyzePriceAction(candles, instrument.decimals),
+            analysis: analyzePriceAction(candles, instrument.decimals, {
+              timeframe: tf,
+            }),
           };
         })
       );

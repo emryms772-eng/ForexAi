@@ -8,7 +8,10 @@ import type {
   Timeframe,
   TimeframeAlignmentItem,
 } from '../types/market.ts';
-import { extractHistoricalPriceActionTimeline } from './priceAction.ts';
+import {
+  extractHistoricalPriceActionTimeline,
+  getClosedCandlesForTimeframe,
+} from './priceAction.ts';
 
 export interface TimeframePriceActionInput {
   timeframe: Timeframe;
@@ -102,28 +105,28 @@ export function buildMtfSignalPrompt(params: {
   const { symbol, activeTimeframe, timeframesData } = params;
   const instrument = getInstrumentBySymbol(symbol);
 
-  const activeEntry =
+  const m5Entry =
+    timeframesData.find((t) => t.timeframe === '5M') ??
     timeframesData.find((t) => t.timeframe === activeTimeframe) ??
     timeframesData[0];
 
-  const activeClosedCandles =
-    activeEntry.candles.length > 10
-      ? activeEntry.candles.slice(0, -1)
-      : activeEntry.candles;
+  const m5ClosedCandles = getClosedCandlesForTimeframe(m5Entry.candles, '5M');
+  const confirmedBarTime = m5ClosedCandles[m5ClosedCandles.length - 1]?.time ?? 0;
   const currentPrice =
-    activeClosedCandles[activeClosedCandles.length - 1]?.close ??
-    activeEntry.candles[activeEntry.candles.length - 1]?.close ??
+    m5ClosedCandles[m5ClosedCandles.length - 1]?.close ??
+    m5Entry.candles[m5Entry.candles.length - 1]?.close ??
     instrument.basePrice;
 
   const multiTimeframeContext = timeframesData.map((tfItem) => {
     // Strictly exclude unclosed forming bar so AI signals never repaint mid-candle
-    const closedCandles =
-      tfItem.candles.length > 10
-        ? tfItem.candles.slice(0, -1)
-        : tfItem.candles;
+    const closedCandles = getClosedCandlesForTimeframe(
+      tfItem.candles,
+      tfItem.timeframe
+    );
     const timeline = extractHistoricalPriceActionTimeline(
       tfItem.candles,
-      instrument.decimals
+      instrument.decimals,
+      { timeframe: tfItem.timeframe }
     );
     const recentBarCount =
       tfItem.timeframe === '5M' ? 32 : tfItem.timeframe === '1M' ? 12 : 14;
@@ -220,6 +223,7 @@ export function buildMtfSignalPrompt(params: {
   return {
     instrument,
     currentPrice,
+    confirmedBarTime,
     payloadJson,
     systemInstruction,
     userPrompt,
@@ -231,9 +235,17 @@ export function normalizeSignalResult(params: {
   symbol: string;
   activeTimeframe: Timeframe;
   currentPrice: number;
+  confirmedBarTime?: number;
   model: string;
 }): AIPriceActionSignal {
-  const { parsed, symbol, activeTimeframe, currentPrice, model } = params;
+  const {
+    parsed,
+    symbol,
+    activeTimeframe,
+    currentPrice,
+    confirmedBarTime = 0,
+    model,
+  } = params;
   const instrument = getInstrumentBySymbol(symbol);
   const rawPlan = (parsed.plan ?? {}) as Partial<AIPriceActionSignal['plan']>;
 
@@ -257,11 +269,14 @@ export function normalizeSignalResult(params: {
   };
 
   return {
-    id: `sig-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    id: `sig-${instrument.symbol.replace('/', '')}-${confirmedBarTime || Date.now()}`,
     symbol: instrument.symbol,
     timeframe: activeTimeframe,
     signalTimeframe: '5M',
     analyzedAt: new Date().toISOString(),
+    confirmedBarTime,
+    confirmedBarCloseTime: confirmedBarTime > 0 ? confirmedBarTime + 300 : 0,
+    isLockedToClosedBar: true,
     model,
     spotPriceAtSignal: currentPrice,
     bias,
@@ -375,19 +390,28 @@ export function formatSmsSignalText(signal: AIPriceActionSignal): string {
   const d = instrument.decimals;
   const fmt = (val: number) => (val > 0 ? val.toFixed(d) : 'Watch');
   const { plan } = signal;
-  const timestamp = new Date(signal.analyzedAt || Date.now()).toLocaleTimeString([], {
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  const barTime =
+    signal.confirmedBarTime > 0
+      ? new Date(signal.confirmedBarTime * 1000).toISOString().slice(11, 16) + ' UTC'
+      : new Date(signal.analyzedAt || Date.now()).toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+        });
+
+  const actionLine =
+    plan.signal === 'WAIT'
+      ? 'Action: WAIT FOR 5M CANDLE CLOSE CONFIRMATION'
+      : `Action: ENTER NOW (${plan.signal} Confirmed on Closed 5M Bar)`;
 
   const lines = [
     `StrataDesk 5M | ${signal.symbol}`,
     `${plan.signal} (${plan.signalStrength}) | ${plan.setupType}`,
+    actionLine,
     `Entry: ${fmt(plan.entryPrice)} | SL: ${fmt(plan.stopLoss)}`,
     `TP1: ${fmt(plan.takeProfit1)} | TP2: ${fmt(plan.takeProfit2)} (${plan.riskRewardRatio})`,
     `Trigger: ${plan.triggerPattern}`,
     `Invalidation: ${plan.invalidationReason}`,
-    `Closed-Bar Non-Repainting (${timestamp})`,
+    `Locked Closed Bar: ${barTime} (Non-Repainting)`,
   ];
 
   return lines.join('\n');

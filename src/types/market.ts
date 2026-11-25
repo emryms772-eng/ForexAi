@@ -141,12 +141,31 @@ export interface TimeframeAlignmentItem {
   note: string;
 }
 
+export type EntryTimingStatus =
+  | 'ENTER_NOW'
+  | 'WAIT_CANDLE_CLOSE'
+  | 'WAIT_FOR_SETUP'
+  | 'INVALIDATED'
+  | 'MISSED';
+
+export interface SignalEntryTiming {
+  decision: EntryTimingStatus;
+  headline: string;
+  detail: string;
+  closeCondition: string;
+  candleCloseTime: number;
+  candleTimeframe: Timeframe;
+}
+
 export interface AIPriceActionSignal {
   id: string;
   symbol: string;
   timeframe: Timeframe;
   signalTimeframe: Timeframe;
   analyzedAt: string;
+  confirmedBarTime: number;
+  confirmedBarCloseTime: number;
+  isLockedToClosedBar: boolean;
   model: string;
   spotPriceAtSignal: number;
   bias: 'Bullish' | 'Bearish' | 'Neutral';

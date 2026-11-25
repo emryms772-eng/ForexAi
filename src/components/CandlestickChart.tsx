@@ -14,6 +14,8 @@ import {
 } from 'lightweight-charts';
 import { Eye, EyeOff, RotateCcw } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { formatCountdown } from '../analysis/entryTiming';
+import { getCandleProgress } from '../analysis/priceAction';
 import { TIMEFRAMES } from '../config/instruments';
 import type {
   AIPriceActionSignal,
@@ -61,6 +63,19 @@ export function CandlestickChart({
   const [showMarkers, setShowMarkers] = useState(true);
   const [showSignalLines, setShowSignalLines] = useState(true);
   const [hoveredBar, setHoveredBar] = useState<OHLCVCandle | null>(null);
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setNowSec(Math.floor(Date.now() / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const candleCountdown = useMemo(
+    () => formatCountdown(getCandleProgress(timeframe, nowSec).secondsRemaining),
+    [timeframe, nowSec]
+  );
 
   const orderedCandles = useMemo(() => {
     const valid = candles.filter(
@@ -576,9 +591,15 @@ export function CandlestickChart({
               C <span className="text-slate-100">{displayBar.close.toFixed(decimals)}</span>
             </span>
           </div>
-          <span className="text-sky-400 whitespace-nowrap">
-            {priceAction.snapshot.latestStructureEvent}
-          </span>
+          <div className="flex items-center gap-3 whitespace-nowrap">
+            <span className="text-slate-400">
+              {timeframe} close{' '}
+              <span className="text-slate-200">{candleCountdown}</span>
+            </span>
+            <span className="text-sky-400">
+              {priceAction.snapshot.latestStructureEvent}
+            </span>
+          </div>
         </div>
       )}
 

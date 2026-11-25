@@ -8,18 +8,32 @@ import {
   ChevronUp,
   Clock,
   Copy,
+  Lock,
   RefreshCw,
   Send,
+  ShieldAlert,
   Zap,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import {
+  evaluateSignalEntryTiming,
+  formatCountdown,
+  formatUtcTime,
+} from '../analysis/entryTiming';
 import { formatSmsSignalText } from '../analysis/mtfPrompt';
-import type { AIPriceActionSignal, Timeframe } from '../types/market';
+import { getCandleProgress } from '../analysis/priceAction';
+import type {
+  AIPriceActionSignal,
+  OHLCVCandle,
+  Timeframe,
+} from '../types/market';
 
 interface AIAnalysisCardProps {
   symbol: string;
   timeframe: Timeframe;
   decimals: number;
+  livePrice?: number;
+  formingCandle?: OHLCVCandle | null;
   signal: AIPriceActionSignal | null;
   isAnalyzing: boolean;
   error: string | null;
@@ -35,6 +49,8 @@ export function AIAnalysisCard({
   symbol,
   timeframe,
   decimals,
+  livePrice = 0,
+  formingCandle = null,
   signal,
   isAnalyzing,
   error,
@@ -47,6 +63,31 @@ export function AIAnalysisCard({
 }: AIAnalysisCardProps) {
   const [showBreakdown, setShowBreakdown] = useState(false);
   const [copiedAlert, setCopiedAlert] = useState(false);
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setNowSec(Math.floor(Date.now() / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const execProgress = useMemo(
+    () => getCandleProgress('5M', nowSec),
+    [nowSec]
+  );
+
+  const entryTiming = useMemo(() => {
+    if (!signal) return null;
+    return evaluateSignalEntryTiming({
+      signal,
+      livePrice: signal.symbol === symbol ? livePrice : signal.spotPriceAtSignal,
+      formingCandle:
+        signal.symbol === symbol && timeframe === '5M' ? formingCandle : null,
+      activeChartTimeframe: timeframe,
+      nowSec,
+    });
+  }, [signal, symbol, livePrice, timeframe, formingCandle, nowSec]);
 
   const handleCopySmsAlert = async () => {
     if (!signal) return;
@@ -82,6 +123,16 @@ export function AIAnalysisCard({
       ? 'border-rose-500/35 bg-rose-500/10'
       : 'border-amber-500/35 bg-amber-500/10';
 
+  const timingStyle =
+    entryTiming?.decision === 'ENTER_NOW'
+      ? 'border-emerald-500/45 bg-emerald-500/12 text-emerald-100'
+      : entryTiming?.decision === 'WAIT_CANDLE_CLOSE'
+      ? 'border-amber-500/45 bg-amber-500/12 text-amber-100'
+      : entryTiming?.decision === 'INVALIDATED' ||
+        entryTiming?.decision === 'MISSED'
+      ? 'border-rose-500/40 bg-rose-500/10 text-rose-100'
+      : 'border-slate-700/90 bg-[#0B0F17] text-slate-200';
+
   return (
     <section
       id="setup"
@@ -89,12 +140,14 @@ export function AIAnalysisCard({
       className="flex flex-col rounded-lg border border-slate-800/90 bg-[#111722]"
     >
       <div className="flex items-center justify-between gap-3 border-b border-slate-800/80 px-4 py-3.5 sm:px-5">
-        <div>
+        <div className="min-w-0">
           <h2 className="text-sm font-semibold text-slate-50">
             5M AI Signal
           </h2>
-          <p className="mt-0.5 text-xs text-slate-400">
-            {symbol} <span aria-hidden="true">·</span> 4H–1M Closed-Bar Non-Repainting
+          <p className="mt-0.5 text-xs text-slate-400 font-mono tabular-nums truncate">
+            {symbol} <span aria-hidden="true">·</span> Non-Repainting{' '}
+            <span aria-hidden="true">·</span> 5M Close{' '}
+            {formatCountdown(execProgress.secondsRemaining)}
           </p>
         </div>
 
@@ -123,7 +176,7 @@ export function AIAnalysisCard({
               <div className="h-14 rounded bg-slate-800/50 animate-pulse" />
             </div>
             <p className="text-xs text-slate-400">
-              Analyzing 4H–1M history for {symbol} 5M setup...
+              Analyzing closed 4H–1M candles for {symbol} 5M setup...
             </p>
           </div>
         )}
@@ -164,8 +217,8 @@ export function AIAnalysisCard({
                 Ready to Scan {symbol}
               </h3>
               <p className="mx-auto max-w-xs text-xs leading-relaxed text-slate-400">
-                Reads past-to-present structure across 4H–1M and returns a 5M
-                BUY, SELL, or WAIT plan with Entry, SL, and TP.
+                Locks strictly to closed 5M candles so signals never repaint mid-bar,
+                and tells you whether to enter now or wait for candle close.
               </p>
             </div>
             <button
@@ -233,6 +286,54 @@ export function AIAnalysisCard({
               </div>
             </div>
 
+            {/* Unambiguous Entry Timing Verdict: ENTER NOW vs WAIT FOR CANDLE CLOSE */}
+            {entryTiming && (
+              <div className={`rounded-md border p-3.5 space-y-2 ${timingStyle}`}>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-start gap-2 min-w-0">
+                    {entryTiming.decision === 'ENTER_NOW' ? (
+                      <CheckCircle2
+                        className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400"
+                        aria-hidden="true"
+                      />
+                    ) : entryTiming.decision === 'WAIT_CANDLE_CLOSE' ? (
+                      <Clock
+                        className="mt-0.5 h-4 w-4 shrink-0 text-amber-300"
+                        aria-hidden="true"
+                      />
+                    ) : (
+                      <ShieldAlert
+                        className="mt-0.5 h-4 w-4 shrink-0 text-slate-300"
+                        aria-hidden="true"
+                      />
+                    )}
+                    <div className="text-xs font-bold tracking-tight">
+                      {entryTiming.headline}
+                    </div>
+                  </div>
+                  <span className="font-mono tabular-nums text-xs font-semibold shrink-0">
+                    {formatCountdown(execProgress.secondsRemaining)}
+                  </span>
+                </div>
+
+                <p className="text-xs leading-relaxed opacity-90">
+                  {entryTiming.detail}
+                </p>
+
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/10 pt-2 text-[11px] opacity-85">
+                  <span className="truncate">{entryTiming.closeCondition}</span>
+                  <span className="inline-flex items-center gap-1 font-mono tabular-nums shrink-0 text-slate-300">
+                    <Lock className="h-3 w-3" aria-hidden="true" />
+                    <span>
+                      {signal.confirmedBarTime > 0
+                        ? `Locked ${formatUtcTime(signal.confirmedBarTime)} bar`
+                        : 'Closed-bar locked'}
+                    </span>
+                  </span>
+                </div>
+              </div>
+            )}
+
             {!isDifferentSymbol && !isViewingRecommendedTf && (
               <div className="flex items-center justify-between gap-2 rounded-md border border-blue-500/30 bg-blue-500/10 px-3 py-2 text-xs text-blue-200">
                 <span>Execution is on 5M (viewing {timeframe}).</span>
@@ -251,9 +352,15 @@ export function AIAnalysisCard({
                 <button
                   type="button"
                   onClick={() => onExecuteOnDemo(signal)}
-                  className="flex-1 min-h-[40px] rounded-md border border-blue-500/40 bg-blue-600/15 px-3 py-2 text-xs font-semibold text-blue-200 transition-colors hover:bg-blue-600/25 whitespace-nowrap cursor-pointer"
+                  className={`flex-1 min-h-[40px] rounded-md border px-3 py-2 text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                    entryTiming?.decision === 'ENTER_NOW'
+                      ? 'border-emerald-500/50 bg-emerald-600/20 text-emerald-200 hover:bg-emerald-600/30'
+                      : 'border-blue-500/40 bg-blue-600/15 text-blue-200 hover:bg-blue-600/25'
+                  }`}
                 >
-                  Execute {signal.plan.signal} (Demo)
+                  {entryTiming?.decision === 'ENTER_NOW'
+                    ? `Enter ${signal.plan.signal} Now (Demo)`
+                    : `Execute ${signal.plan.signal} (Demo)`}
                 </button>
               )}
 

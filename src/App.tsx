@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { analyzePriceAction } from './analysis/priceAction';
+import {
+  analyzePriceAction,
+  getCandleProgress,
+  getClosedCandlesForTimeframe,
+} from './analysis/priceAction';
 import { AIAnalysisCard } from './components/AIAnalysisCard';
 import { BacktestPanel } from './components/BacktestPanel';
 import { CandlestickChart } from './components/CandlestickChart';
@@ -139,9 +143,36 @@ export default function App() {
     [selectedSymbol]
   );
 
+  const lastClosedScanKeyRef = useRef<string>('');
+  const stableClosedRef = useRef<{
+    key: string;
+    candles: OHLCVCandle[];
+  }>({ key: '', candles: [] });
+
+  const closedCandles = useMemo(() => {
+    const closed = getClosedCandlesForTimeframe(candles, timeframe);
+    const last = closed[closed.length - 1];
+    const key = `${selectedSymbol}:${timeframe}:${closed.length}:${last?.time ?? 0}:${last?.close ?? 0}`;
+    if (stableClosedRef.current.key === key) {
+      return stableClosedRef.current.candles;
+    }
+    stableClosedRef.current = { key, candles: closed };
+    return closed;
+  }, [candles, selectedSymbol, timeframe]);
+
+  const formingCandle = useMemo(() => {
+    if (candles.length === 0) return null;
+    const { bucketStartSec } = getCandleProgress(timeframe);
+    const last = candles[candles.length - 1];
+    return last && last.time >= bucketStartSec ? last : null;
+  }, [candles, timeframe]);
+
   const priceAction = useMemo(
-    () => analyzePriceAction(candles, instrument.decimals),
-    [candles, instrument.decimals]
+    () =>
+      analyzePriceAction(closedCandles, instrument.decimals, {
+        excludeFormingBar: false,
+      }),
+    [closedCandles, instrument.decimals]
   );
 
   const openPositionForSymbol = useMemo(
@@ -361,7 +392,12 @@ export default function App() {
         });
 
         setActiveSignal(result.signal);
-        setSignalHistory((prev) => [result.signal, ...prev].slice(0, 15));
+        setSignalHistory((prev) =>
+          [
+            result.signal,
+            ...prev.filter((item) => item.id !== result.signal.id),
+          ].slice(0, 15)
+        );
 
         setDemoAccount((prev) => {
           if (!prev.config.autoTradeEnabled) return prev;
@@ -494,6 +530,29 @@ export default function App() {
     timeframe,
     runSignalScan,
   ]);
+
+  // Automatically re-evaluate once when the active 5M candle closes (never mid-candle)
+  useEffect(() => {
+    if (!activeSignal || activeSignal.symbol !== selectedSymbol) return;
+
+    const checkCandleClose = () => {
+      if (isAnalyzingRef.current) return;
+      const { bucketStartSec } = getCandleProgress('5M');
+      const latestClosed5mBarTime = bucketStartSec - 300;
+      const scanKey = `${selectedSymbol}:${latestClosed5mBarTime}`;
+      if (
+        activeSignal.confirmedBarTime > 0 &&
+        latestClosed5mBarTime > activeSignal.confirmedBarTime &&
+        lastClosedScanKeyRef.current !== scanKey
+      ) {
+        lastClosedScanKeyRef.current = scanKey;
+        void runSignalScan(selectedSymbol, timeframe, false);
+      }
+    };
+
+    const timer = setInterval(checkCandleClose, 2000);
+    return () => clearInterval(timer);
+  }, [activeSignal, selectedSymbol, timeframe, runSignalScan]);
 
   const handleUpdateConfig = useCallback((patch: Partial<AutoTradeConfig>) => {
     setDemoAccount((prev) => ({
@@ -632,6 +691,8 @@ export default function App() {
                     symbol={selectedSymbol}
                     timeframe={timeframe}
                     decimals={instrument.decimals}
+                    livePrice={displayPrice}
+                    formingCandle={formingCandle}
                     signal={activeSignal}
                     isAnalyzing={isAnalyzing}
                     error={aiError}

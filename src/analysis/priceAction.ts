@@ -1,3 +1,4 @@
+import { TIMEFRAME_SECONDS } from '../config/instruments.ts';
 import type {
   CandlePatternEvent,
   KeyLevel,
@@ -6,6 +7,7 @@ import type {
   PriceActionMarker,
   PriceActionSnapshot,
   PriceActionZone,
+  Timeframe,
 } from '../types/market.ts';
 
 function roundToDecimals(value: number, decimals: number): number {
@@ -450,6 +452,43 @@ export interface AnalyzePriceActionOptions {
    * so confirmed signals never appear and disappear mid-candle.
    */
   excludeFormingBar?: boolean;
+  timeframe?: Timeframe;
+  nowSec?: number;
+}
+
+export function getCandleProgress(
+  timeframe: Timeframe,
+  nowSec = Math.floor(Date.now() / 1000)
+): {
+  tfSeconds: number;
+  bucketStartSec: number;
+  nextCloseSec: number;
+  secondsRemaining: number;
+} {
+  const tfSeconds = TIMEFRAME_SECONDS[timeframe];
+  const bucketStartSec = Math.floor(nowSec / tfSeconds) * tfSeconds;
+  const nextCloseSec = bucketStartSec + tfSeconds;
+  const secondsRemaining = Math.max(0, nextCloseSec - nowSec);
+  return { tfSeconds, bucketStartSec, nextCloseSec, secondsRemaining };
+}
+
+/**
+ * Strictly isolates immutable closed candles by timeframe bucket start time.
+ * Never drops a closed bar if the forming bar hasn't opened yet, and never leaks
+ * an unclosed forming bar into structural analysis.
+ */
+export function getClosedCandlesForTimeframe(
+  candles: OHLCVCandle[],
+  timeframe?: Timeframe,
+  nowSec = Math.floor(Date.now() / 1000)
+): OHLCVCandle[] {
+  if (candles.length === 0) return candles;
+  if (timeframe) {
+    const { bucketStartSec } = getCandleProgress(timeframe, nowSec);
+    const closed = candles.filter((c) => c.time < bucketStartSec);
+    if (closed.length > 0) return closed;
+  }
+  return candles.length > 10 ? candles.slice(0, -1) : candles;
 }
 
 export function analyzePriceAction(
@@ -458,8 +497,9 @@ export function analyzePriceAction(
   options: AnalyzePriceActionOptions = {}
 ): PriceActionAnalysisSummary {
   const excludeFormingBar = options.excludeFormingBar ?? true;
-  const evalCandles =
-    excludeFormingBar && candles.length > 10 ? candles.slice(0, -1) : candles;
+  const evalCandles = excludeFormingBar
+    ? getClosedCandlesForTimeframe(candles, options.timeframe, options.nowSec)
+    : candles;
 
   if (evalCandles.length === 0) {
     return {
@@ -671,9 +711,14 @@ function formatUtcShort(unixSec: number): string {
  */
 export function extractHistoricalPriceActionTimeline(
   candles: OHLCVCandle[],
-  decimals: number
+  decimals: number,
+  options: { timeframe?: Timeframe; nowSec?: number } = {}
 ): HistoricalPriceActionTimeline {
-  const evalCandles = candles.length > 10 ? candles.slice(0, -1) : candles;
+  const evalCandles = getClosedCandlesForTimeframe(
+    candles,
+    options.timeframe,
+    options.nowSec
+  );
   if (evalCandles.length === 0) {
     return {
       barsAnalyzed: 0,

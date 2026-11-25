@@ -38,10 +38,11 @@ const GROQ_PREFERRED_MODELS = [
   'gemma2-9b-it',
 ];
 const GROQ_MODELS_CACHE_TTL_MS = 5 * 60_000;
-const SIGNAL_CACHE_TTL_MS = 25_000;
+const SIGNAL_CACHE_TTL_MS = 6 * 60_000; // Locked for full 5M candle duration until a new bar closes
 
 interface CachedSignalEntry {
   createdAt: number;
+  confirmedBarTime: number;
   signal: AIPriceActionSignal;
 }
 
@@ -114,13 +115,15 @@ async function runGeminiModel(
   ai: GoogleGenAI,
   model: string,
   systemInstruction: string,
-  payloadJson: string
+  payloadJson: string,
+  seed?: number
 ): Promise<RawSignalJSON> {
   const response = await ai.models.generateContent({
     model,
     contents: `Analyze the full past-to-present historical progression AND recent OHLC price action across all 5 timeframes (4H, 1H, 15M, 5M, 1M) and output a 5M execution signal (BUY, SELL, or WAIT):\n${payloadJson}`,
     config: {
       systemInstruction,
+      ...(typeof seed === 'number' && seed > 0 ? { seed } : {}),
       ...(model === PRIMARY_MODEL
         ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
         : {}),
@@ -411,23 +414,34 @@ export async function generatePriceActionSignal(params: {
   const { symbol, activeTimeframe, timeframesData } = params;
   const instrument = getInstrumentBySymbol(symbol);
 
-  const cached = signalCache.get(instrument.symbol);
-  if (cached && Date.now() - cached.createdAt < SIGNAL_CACHE_TTL_MS) {
+  const geminiKey = getGeminiApiKey();
+  const groqKey = getGroqApiKey();
+
+  const {
+    currentPrice,
+    confirmedBarTime,
+    payloadJson,
+    systemInstruction,
+    userPrompt,
+  } = buildMtfSignalPrompt({
+    symbol,
+    activeTimeframe,
+    timeframesData,
+  });
+
+  // Strict non-repainting lock: return the exact signal locked to this closed 5M candle
+  const cacheKey = `${instrument.symbol}:${confirmedBarTime}`;
+  const cached = signalCache.get(cacheKey);
+  if (
+    cached &&
+    confirmedBarTime > 0 &&
+    Date.now() - cached.createdAt < SIGNAL_CACHE_TTL_MS
+  ) {
     return {
       ...cached.signal,
       timeframe: activeTimeframe,
     };
   }
-
-  const geminiKey = getGeminiApiKey();
-  const groqKey = getGroqApiKey();
-
-  const { currentPrice, payloadJson, systemInstruction, userPrompt } =
-    buildMtfSignalPrompt({
-      symbol,
-      activeTimeframe,
-      timeframesData,
-    });
 
   let parsed: RawSignalJSON | null = null;
   let usedModel = PRIMARY_MODEL;
@@ -439,7 +453,8 @@ export async function generatePriceActionSignal(params: {
         ai,
         PRIMARY_MODEL,
         systemInstruction,
-        payloadJson
+        payloadJson,
+        confirmedBarTime
       );
       usedModel = PRIMARY_MODEL;
     } catch {
@@ -448,7 +463,8 @@ export async function generatePriceActionSignal(params: {
           ai,
           FALLBACK_MODEL,
           systemInstruction,
-          payloadJson
+          payloadJson,
+          confirmedBarTime
         );
         usedModel = FALLBACK_MODEL;
       } catch {
@@ -478,6 +494,7 @@ export async function generatePriceActionSignal(params: {
         symbol: instrument.symbol,
         activeTimeframe,
         currentPrice,
+        confirmedBarTime,
         model: usedModel,
       })
     : generateLocalMtfSignal({
@@ -486,8 +503,14 @@ export async function generatePriceActionSignal(params: {
         timeframesData,
       });
 
-  signalCache.set(instrument.symbol, {
+  if (signalCache.size > 40) {
+    const oldestKey = signalCache.keys().next().value;
+    if (oldestKey) signalCache.delete(oldestKey);
+  }
+
+  signalCache.set(cacheKey, {
     createdAt: Date.now(),
+    confirmedBarTime: signal.confirmedBarTime || confirmedBarTime,
     signal,
   });
 

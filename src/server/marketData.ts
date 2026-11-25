@@ -20,6 +20,7 @@ interface SeriesState {
   source: FeedOrigin;
   sourceLabel: string;
   lastUpdatedAt: number;
+  lastUpstreamFetchAt: number;
   anchorOpen24h: number;
   dailyChangePct?: number;
   dailyHigh24h?: number;
@@ -972,10 +973,18 @@ export async function getMarketCandles(
   const cacheKey = `${instrument.symbol}:${timeframe}`;
   const existing = seriesCache.get(cacheKey);
 
-  // Reuse cached series for 20s and sync forming bar with live broker spot quote
+  const tfSec = TIMEFRAME_SECONDS[timeframe];
+  const nowMs = Date.now();
+  const nowBucket = getBucketTime(Math.floor(nowMs / 1000), tfSec);
+  const cachedBucket = existing
+    ? getBucketTime(Math.floor(existing.lastUpstreamFetchAt / 1000), tfSec)
+    : 0;
+
+  // Reuse cached series for 25s within the same candle bucket; immediately refresh when a new candle closes
   if (
     existing &&
-    Date.now() - existing.lastUpdatedAt < 20000 &&
+    nowMs - existing.lastUpstreamFetchAt < 25000 &&
+    cachedBucket === nowBucket &&
     existing.candles.length >= limit
   ) {
     const slice = existing.candles.slice(-limit);
@@ -1036,6 +1045,7 @@ export async function getMarketCandles(
     source: fetched.source,
     sourceLabel: fetched.sourceLabel,
     lastUpdatedAt: Date.now(),
+    lastUpstreamFetchAt: Date.now(),
     anchorOpen24h,
     dailyChangePct: liveQuote?.changePct,
     dailyHigh24h: liveQuote?.high24h,
