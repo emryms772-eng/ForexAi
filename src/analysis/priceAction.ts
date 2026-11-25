@@ -636,3 +636,217 @@ export function analyzePriceAction(
     recentPatterns: patternResult.patterns,
   };
 }
+
+export interface HistoricalPriceActionTimeline {
+  barsAnalyzed: number;
+  windowStartIso: string;
+  windowEndIso: string;
+  historicalHigh: number;
+  historicalLow: number;
+  macroRangePositionPct: number;
+  macroZone: 'Discount' | 'Equilibrium' | 'Premium';
+  swingSequence: Array<{
+    time: string;
+    label: 'HH' | 'LH' | 'HL' | 'LL' | 'SH' | 'SL';
+    price: number;
+  }>;
+  historicalStructureAndSweeps: Array<{
+    time: string;
+    event: string;
+    price: number;
+    bias: 'Bullish' | 'Bearish';
+  }>;
+  earlierSessionVsRecentShift: string;
+}
+
+function formatUtcShort(unixSec: number): string {
+  return new Date(unixSec * 1000).toISOString().slice(5, 16).replace('T', ' ');
+}
+
+/**
+ * Extracts chronological past-to-present price action across the entire candle history
+ * (not just the most recent bars) so MTF analysis understands how structure evolved into present price.
+ */
+export function extractHistoricalPriceActionTimeline(
+  candles: OHLCVCandle[],
+  decimals: number
+): HistoricalPriceActionTimeline {
+  const evalCandles = candles.length > 10 ? candles.slice(0, -1) : candles;
+  if (evalCandles.length === 0) {
+    return {
+      barsAnalyzed: 0,
+      windowStartIso: '',
+      windowEndIso: '',
+      historicalHigh: 0,
+      historicalLow: 0,
+      macroRangePositionPct: 50,
+      macroZone: 'Equilibrium',
+      swingSequence: [],
+      historicalStructureAndSweeps: [],
+      earlierSessionVsRecentShift: 'Insufficient historical bars.',
+    };
+  }
+
+  const pivots = detectSwingPivots(evalCandles, PIVOT_LOOKBACK);
+  const lastClose = candles[candles.length - 1].close;
+  const historicalHigh = roundToDecimals(
+    Math.max(...evalCandles.map((c) => c.high)),
+    decimals
+  );
+  const historicalLow = roundToDecimals(
+    Math.min(...evalCandles.map((c) => c.low)),
+    decimals
+  );
+  const macroSpan = Math.max(historicalHigh - historicalLow, 1e-9);
+  const macroRangePositionPct =
+    Math.round(
+      Math.min(100, Math.max(0, ((lastClose - historicalLow) / macroSpan) * 100)) *
+        10
+    ) / 10;
+  const macroZone: HistoricalPriceActionTimeline['macroZone'] =
+    macroRangePositionPct <= 40
+      ? 'Discount'
+      : macroRangePositionPct >= 60
+      ? 'Premium'
+      : 'Equilibrium';
+
+  // Label chronological swing pivots as HH / LH / HL / LL across the entire sample
+  let prevHigh: number | null = null;
+  let prevLow: number | null = null;
+  const labeledSwings: HistoricalPriceActionTimeline['swingSequence'] = [];
+
+  for (const p of pivots) {
+    const rounded = roundToDecimals(p.price, decimals);
+    if (p.kind === 'high') {
+      const label =
+        prevHigh === null ? 'SH' : rounded >= prevHigh ? 'HH' : 'LH';
+      prevHigh = rounded;
+      labeledSwings.push({ time: formatUtcShort(p.time), label, price: rounded });
+    } else {
+      const label =
+        prevLow === null ? 'SL' : rounded >= prevLow ? 'HL' : 'LL';
+      prevLow = rounded;
+      labeledSwings.push({ time: formatUtcShort(p.time), label, price: rounded });
+    }
+  }
+
+  // Walk chronologically through the full history to capture major BOS, CHoCH, and Liquidity Sweeps
+  const events: HistoricalPriceActionTimeline['historicalStructureAndSweeps'] = [];
+  const swingHighs = pivots.filter((p) => p.kind === 'high');
+  const swingLows = pivots.filter((p) => p.kind === 'low');
+
+  let runningTrend: 'Bullish' | 'Bearish' | 'Neutral' = 'Neutral';
+  const brokenHighIds = new Set<number>();
+  const brokenLowIds = new Set<number>();
+  const sweptHighIds = new Set<number>();
+  const sweptLowIds = new Set<number>();
+
+  for (let idx = PIVOT_LOOKBACK * 2 + 1; idx < evalCandles.length; idx++) {
+    const bar = evalCandles[idx];
+
+    // Check most recent un-broken/un-swept confirmed swing high prior to this bar
+    for (let h = swingHighs.length - 1; h >= 0; h--) {
+      const sh = swingHighs[h];
+      if (sh.confirmIndex >= idx) continue;
+      if (!brokenHighIds.has(sh.index) && bar.close > sh.price) {
+        brokenHighIds.add(sh.index);
+        const isChoch = runningTrend === 'Bearish';
+        runningTrend = 'Bullish';
+        events.push({
+          time: formatUtcShort(bar.time),
+          event: isChoch ? 'Bullish CHoCH' : 'Bullish BOS',
+          price: roundToDecimals(sh.price, decimals),
+          bias: 'Bullish',
+        });
+        break;
+      }
+      if (
+        !sweptHighIds.has(sh.index) &&
+        bar.high > sh.price &&
+        bar.close < sh.price
+      ) {
+        sweptHighIds.add(sh.index);
+        events.push({
+          time: formatUtcShort(bar.time),
+          event: 'Buy-Side Liquidity Sweep',
+          price: roundToDecimals(sh.price, decimals),
+          bias: 'Bearish',
+        });
+        break;
+      }
+    }
+
+    // Check most recent un-broken/un-swept confirmed swing low prior to this bar
+    for (let l = swingLows.length - 1; l >= 0; l--) {
+      const sl = swingLows[l];
+      if (sl.confirmIndex >= idx) continue;
+      if (!brokenLowIds.has(sl.index) && bar.close < sl.price) {
+        brokenLowIds.add(sl.index);
+        const isChoch = runningTrend === 'Bullish';
+        runningTrend = 'Bearish';
+        events.push({
+          time: formatUtcShort(bar.time),
+          event: isChoch ? 'Bearish CHoCH' : 'Bearish BOS',
+          price: roundToDecimals(sl.price, decimals),
+          bias: 'Bearish',
+        });
+        break;
+      }
+      if (
+        !sweptLowIds.has(sl.index) &&
+        bar.low < sl.price &&
+        bar.close > sl.price
+      ) {
+        sweptLowIds.add(sl.index);
+        events.push({
+          time: formatUtcShort(bar.time),
+          event: 'Sell-Side Liquidity Sweep',
+          price: roundToDecimals(sl.price, decimals),
+          bias: 'Bullish',
+        });
+        break;
+      }
+    }
+  }
+
+  const midIdx = Math.floor(evalCandles.length / 2);
+  const earlySlice = evalCandles.slice(0, midIdx);
+  const recentSlice = evalCandles.slice(midIdx);
+  const earlyOpen = earlySlice[0]?.open ?? lastClose;
+  const midClose = earlySlice[earlySlice.length - 1]?.close ?? lastClose;
+  const earlyPct = ((midClose - earlyOpen) / Math.max(earlyOpen, 1e-9)) * 100;
+  const recentPct =
+    ((lastClose - midClose) / Math.max(midClose, 1e-9)) * 100;
+  const earlyHigh = roundToDecimals(
+    Math.max(...earlySlice.map((c) => c.high)),
+    decimals
+  );
+  const earlyLow = roundToDecimals(
+    Math.min(...earlySlice.map((c) => c.low)),
+    decimals
+  );
+  const recentHigh = roundToDecimals(
+    Math.max(...recentSlice.map((c) => c.high)),
+    decimals
+  );
+  const recentLow = roundToDecimals(
+    Math.min(...recentSlice.map((c) => c.low)),
+    decimals
+  );
+
+  const earlierSessionVsRecentShift = `Earlier half (${earlyPct >= 0 ? '+' : ''}${earlyPct.toFixed(2)}%, range ${earlyLow}-${earlyHigh}) -> Recent half (${recentPct >= 0 ? '+' : ''}${recentPct.toFixed(2)}%, range ${recentLow}-${recentHigh})`;
+
+  return {
+    barsAnalyzed: evalCandles.length,
+    windowStartIso: formatUtcShort(evalCandles[0].time),
+    windowEndIso: formatUtcShort(evalCandles[evalCandles.length - 1].time),
+    historicalHigh,
+    historicalLow,
+    macroRangePositionPct,
+    macroZone,
+    swingSequence: labeledSwings.slice(-10),
+    historicalStructureAndSweeps: events.slice(-12),
+    earlierSessionVsRecentShift,
+  };
+}
+

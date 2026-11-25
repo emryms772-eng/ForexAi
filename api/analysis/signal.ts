@@ -50,10 +50,12 @@ export default async function handler(
     const orderedTfs: Timeframe[] = ['4H', '1H', '15M', '5M', '1M'];
     const timeframesData = await Promise.all(
       orderedTfs.map(async (tf) => {
+        const targetLimit = tf === '5M' ? 240 : 200;
         const candles =
-          tf === activeTimeframe && clientCandles.length >= 30
+          tf === activeTimeframe && clientCandles.length >= 180
             ? clientCandles
-            : (await getMarketCandles(instrument.symbol, tf, 160)).candles;
+            : (await getMarketCandles(instrument.symbol, tf, targetLimit))
+                .candles;
         return {
           timeframe: tf,
           candles,

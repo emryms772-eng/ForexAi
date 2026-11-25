@@ -66,7 +66,7 @@ export function AIAnalysisCard({
             AI Multi-TF Price Action Signal
           </h2>
           <p className="mt-0.5 text-xs text-slate-400">
-            {symbol} <span aria-hidden="true">·</span> Scans 4H / 1H / 15M / 5M / 1M
+            {symbol} <span aria-hidden="true">·</span> MTF History (4H–1M) → 5M Execution
           </p>
         </div>
 
@@ -136,9 +136,9 @@ export function AIAnalysisCard({
                 Top-Down Price-Action Scanner
               </h3>
               <p className="mx-auto max-w-xs text-xs leading-relaxed text-slate-400">
-                Studies all 5 timeframes (4H, 1H, 15M, 5M, 1M) using pure candle
-                structure, BOS/CHoCH, sweeps, Order Blocks, and FVGs—then pinpoints
-                which timeframe offers the cleanest BUY, SELL, or WAIT setup.
+                Reads past-to-present structure across 4H, 1H, 15M, 5M, and 1M
+                (swings, BOS/CHoCH, sweeps, Order Blocks, and FVGs) and outputs
+                a 5M BUY, SELL, or WAIT execution plan with Entry, SL, and TP.
               </p>
             </div>
             <button
@@ -217,18 +217,16 @@ export function AIAnalysisCard({
             {!isDifferentSymbol && !isViewingRecommendedTf && (
               <div className="flex items-center justify-between gap-2 rounded-md border border-blue-500/30 bg-blue-500/10 px-3 py-2 text-xs text-blue-200">
                 <span>
-                  Optimal setup detected on{' '}
-                  <strong className="font-mono text-blue-100">
-                    {recommendedTf}
-                  </strong>{' '}
+                  Execution is locked to{' '}
+                  <strong className="font-mono text-blue-100">5M</strong>{' '}
                   (currently viewing {timeframe}).
                 </span>
                 <button
                   type="button"
-                  onClick={() => onSelectTimeframe(recommendedTf)}
+                  onClick={() => onSelectTimeframe('5M')}
                   className="font-semibold text-blue-300 underline hover:text-blue-200 whitespace-nowrap cursor-pointer"
                 >
-                  Switch to {recommendedTf}
+                  Switch to 5M
                 </button>
               </div>
             )}
@@ -258,9 +256,13 @@ export function AIAnalysisCard({
             {/* Signal Execution Levels */}
             <div className="grid grid-cols-2 gap-3">
               <div className="rounded-md border border-slate-800/90 bg-[#0B0F17] p-3">
-                <div className="text-[11px] text-slate-400">Signal Entry</div>
+                <div className="text-[11px] text-slate-400">
+                  {signalAction === 'WAIT' ? 'Watch Entry (5M)' : 'Signal Entry (5M)'}
+                </div>
                 <div className="mt-1 font-mono tabular-nums text-sm font-semibold text-blue-400">
-                  {signal.plan.entryPrice.toFixed(decimals)}
+                  {signal.plan.entryPrice > 0
+                    ? signal.plan.entryPrice.toFixed(decimals)
+                    : 'Wait for Trigger'}
                 </div>
                 <div className="mt-0.5 font-mono tabular-nums text-[11px] text-slate-400 truncate">
                   Zone: {signal.plan.entryZone}
@@ -268,9 +270,13 @@ export function AIAnalysisCard({
               </div>
 
               <div className="rounded-md border border-slate-800/90 bg-[#0B0F17] p-3">
-                <div className="text-[11px] text-slate-400">Stop Loss</div>
+                <div className="text-[11px] text-slate-400">
+                  {signalAction === 'WAIT' ? 'Planned Stop Loss' : 'Stop Loss'}
+                </div>
                 <div className="mt-1 font-mono tabular-nums text-sm font-semibold text-rose-400">
-                  {signal.plan.stopLoss.toFixed(decimals)}
+                  {signal.plan.stopLoss > 0
+                    ? signal.plan.stopLoss.toFixed(decimals)
+                    : '—'}
                 </div>
                 <div className="mt-0.5 text-[11px] text-slate-400">
                   Structure invalidation
@@ -278,9 +284,13 @@ export function AIAnalysisCard({
               </div>
 
               <div className="rounded-md border border-slate-800/90 bg-[#0B0F17] p-3">
-                <div className="text-[11px] text-slate-400">Take Profit 1</div>
+                <div className="text-[11px] text-slate-400">
+                  {signalAction === 'WAIT' ? 'Target TP1 (If Triggered)' : 'Take Profit 1'}
+                </div>
                 <div className="mt-1 font-mono tabular-nums text-sm font-semibold text-emerald-400">
-                  {signal.plan.takeProfit1.toFixed(decimals)}
+                  {signal.plan.takeProfit1 > 0
+                    ? signal.plan.takeProfit1.toFixed(decimals)
+                    : '—'}
                 </div>
                 <div className="mt-0.5 text-[11px] text-slate-400">
                   First liquidity target
@@ -288,9 +298,13 @@ export function AIAnalysisCard({
               </div>
 
               <div className="rounded-md border border-slate-800/90 bg-[#0B0F17] p-3">
-                <div className="text-[11px] text-slate-400">Take Profit 2</div>
+                <div className="text-[11px] text-slate-400">
+                  {signalAction === 'WAIT' ? 'Target TP2 (If Triggered)' : 'Take Profit 2'}
+                </div>
                 <div className="mt-1 font-mono tabular-nums text-sm font-semibold text-emerald-300">
-                  {signal.plan.takeProfit2.toFixed(decimals)}
+                  {signal.plan.takeProfit2 > 0
+                    ? signal.plan.takeProfit2.toFixed(decimals)
+                    : '—'}
                 </div>
                 <div className="mt-0.5 text-[11px] text-slate-400">
                   Extended swing target

@@ -1,14 +1,25 @@
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
-import { TIMEFRAMES, getInstrumentBySymbol } from '../config/instruments.ts';
+import {
+  BACKTEST_JSON_SCHEMA_HINT,
+  type RawBacktestReviewJSON,
+  type RawSignalJSON,
+  SIGNAL_JSON_SCHEMA_HINT,
+  type TimeframePriceActionInput,
+  buildBacktestReviewPrompt,
+  buildMtfSignalPrompt,
+  normalizeBacktestReviewResult,
+  normalizeSignalResult,
+  parseJsonFromModelText,
+} from '../analysis/mtfPrompt.ts';
+import { getInstrumentBySymbol } from '../config/instruments.ts';
 import type {
   AIBacktestReview,
   AIPriceActionSignal,
   BacktestResult,
-  OHLCVCandle,
-  PriceActionAnalysisSummary,
   Timeframe,
-  TimeframeAlignmentItem,
 } from '../types/market.ts';
+
+export type { TimeframePriceActionInput };
 
 const PRIMARY_MODEL = 'gemini-4-hydrogen';
 const FALLBACK_MODEL = 'gemini-3.1-flash-lite';
@@ -23,7 +34,7 @@ const GROQ_PREFERRED_MODELS = [
   'gemma2-9b-it',
 ];
 const GROQ_MODELS_CACHE_TTL_MS = 5 * 60_000;
-const SIGNAL_CACHE_TTL_MS = 20_000;
+const SIGNAL_CACHE_TTL_MS = 25_000;
 
 interface CachedSignalEntry {
   createdAt: number;
@@ -53,20 +64,6 @@ function createGeminiClient(apiKey: string): GoogleGenAI {
       },
     },
   });
-}
-
-export interface TimeframePriceActionInput {
-  timeframe: Timeframe;
-  candles: OHLCVCandle[];
-  analysis: PriceActionAnalysisSummary;
-}
-
-function normalizeTimeframe(raw: string, fallback: Timeframe): Timeframe {
-  const upper = raw.trim().toUpperCase();
-  if (TIMEFRAMES.includes(upper as Timeframe)) {
-    return upper as Timeframe;
-  }
-  return fallback;
 }
 
 function isQuotaError(error: unknown): boolean {
@@ -109,15 +106,6 @@ function formatProviderError(error: unknown): Error {
   return error instanceof Error ? error : new Error(raw);
 }
 
-interface RawSignalJSON {
-  bias: 'Bullish' | 'Bearish' | 'Neutral';
-  signalTimeframe: string;
-  priceActionNarrative: string;
-  keyZonesExplanation: string;
-  timeframeAlignment: TimeframeAlignmentItem[];
-  plan: AIPriceActionSignal['plan'];
-}
-
 async function runGeminiModel(
   ai: GoogleGenAI,
   model: string,
@@ -126,7 +114,7 @@ async function runGeminiModel(
 ): Promise<RawSignalJSON> {
   const response = await ai.models.generateContent({
     model,
-    contents: `Analyze all 5 timeframes (1M, 5M, 15M, 1H, 4H) of pure OHLC price action and output a multi-timeframe signal:\n${payloadJson}`,
+    contents: `Analyze the full past-to-present historical progression AND recent OHLC price action across all 5 timeframes (4H, 1H, 15M, 5M, 1M) and output a 5M execution signal (BUY, SELL, or WAIT):\n${payloadJson}`,
     config: {
       systemInstruction,
       ...(model === PRIMARY_MODEL
@@ -142,13 +130,12 @@ async function runGeminiModel(
           },
           signalTimeframe: {
             type: Type.STRING,
-            description:
-              'Best execution timeframe for this signal: 1M, 5M, 15M, 1H, or 4H.',
+            description: 'Always "5M" — all trade executions occur strictly on the 5M chart.',
           },
           priceActionNarrative: {
             type: Type.STRING,
             description:
-              '2-3 sentences explaining top-down alignment from 4H/1H structure down to the chosen execution timeframe trigger without lagging indicators.',
+              '2-3 sentences tracing how earlier historical swings/BOS/sweeps on 4H/1H/15M evolved into current price and whether 5M confirms entry now or requires WAIT.',
           },
           keyZonesExplanation: {
             type: Type.STRING,
@@ -328,12 +315,7 @@ async function getCandidateGroqModels(groqApiKey: string): Promise<string[]> {
 }
 
 function parseJsonResponse<T>(raw: string): T {
-  const cleaned = raw
-    .trim()
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/\s*```$/i, '')
-    .trim();
-  return JSON.parse(cleaned) as T;
+  return parseJsonFromModelText<T>(raw);
 }
 
 async function callGroqJson<T>(
@@ -405,39 +387,14 @@ async function callGroqJson<T>(
 async function runGroqFallback(
   groqApiKey: string,
   systemInstruction: string,
-  payloadJson: string
+  userPrompt: string
 ): Promise<{ data: RawSignalJSON; model: string }> {
-  const schemaPrompt = `${systemInstruction}
-
-Return ONLY valid JSON matching this exact shape:
-{
-  "bias": "Bullish" | "Bearish" | "Neutral",
-  "signalTimeframe": "4H" | "1H" | "15M" | "5M" | "1M",
-  "priceActionNarrative": "string",
-  "keyZonesExplanation": "string",
-  "timeframeAlignment": [
-    { "timeframe": "4H"|"1H"|"15M"|"5M"|"1M", "bias": "Bullish"|"Bearish"|"Neutral", "structureEvent": "string", "rangeZone": "Discount"|"Equilibrium"|"Premium", "note": "string" }
-  ],
-  "plan": {
-    "signal": "BUY" | "SELL" | "WAIT",
-    "signalStrength": "A+ Setup" | "Standard" | "Developing",
-    "setupType": "string",
-    "triggerPattern": "string",
-    "entryPrice": number,
-    "entryZone": "string",
-    "stopLoss": number,
-    "takeProfit1": number,
-    "takeProfit2": number,
-    "riskRewardRatio": "string",
-    "invalidationReason": "string",
-    "confluences": ["string", "string", "string"]
-  }
-}`;
+  const schemaPrompt = `${systemInstruction}\n\n${SIGNAL_JSON_SCHEMA_HINT}`;
 
   return callGroqJson<RawSignalJSON>(
     groqApiKey,
     schemaPrompt,
-    `Analyze all 5 timeframes (1M, 5M, 15M, 1H, 4H) of pure OHLC price action:\n${payloadJson}`,
+    userPrompt,
     'price-action signal'
   );
 }
@@ -467,57 +424,12 @@ export async function generatePriceActionSignal(params: {
     );
   }
 
-  const activeEntry =
-    timeframesData.find((t) => t.timeframe === activeTimeframe) ??
-    timeframesData[0];
-
-  const currentPrice =
-    activeEntry.candles[activeEntry.candles.length - 1]?.close ??
-    instrument.basePrice;
-
-  const multiTimeframeContext = timeframesData.map((tfItem) => ({
-    timeframe: tfItem.timeframe,
-    structure: tfItem.analysis.snapshot,
-    supportResistanceLevels: tfItem.analysis.levels.slice(0, 4),
-    imbalancesAndOrderBlocks: tfItem.analysis.zones.slice(0, 4),
-    recentCandlestickPatterns: tfItem.analysis.recentPatterns.slice(0, 4),
-    recentOHLC: tfItem.candles
-      .slice(tfItem.timeframe === activeTimeframe ? -24 : -12)
-      .map((c) => ({
-        t: new Date(c.time * 1000).toISOString().slice(11, 16),
-        o: c.open,
-        h: c.high,
-        l: c.low,
-        c: c.close,
-      })),
-  }));
-
-  const payloadJson = JSON.stringify({
-    instrument: {
-      symbol: instrument.symbol,
-      name: instrument.name,
-      category: instrument.category,
-      decimals: instrument.decimals,
-    },
-    activeChartTimeframe: activeTimeframe,
-    currentPrice,
-    multiTimeframePriceAction: multiTimeframeContext,
-  });
-
-  const systemInstruction = [
-    'You are an institutional top-down multi-timeframe pure price-action analyst.',
-    'You are given pure OHLC price action across ALL 5 timeframes (1M, 5M, 15M, 1H, 4H) with zero lagging indicators.',
-    'Perform a top-down analysis: evaluate higher-timeframe structure and dominant liquidity sweeps (4H and 1H), mid-timeframe Order Blocks and FVGs (15M), and lower-timeframe execution triggers (5M and 1M).',
-    'MANDATORY EXECUTION FILTERS: (1) Only issue BUY or SELL if aligned with the dominant 1H/4H structural bias and liquidity sweep; (2) Restrict BUY entries to Discount/Deep Discount zones (<= 42% of dealing range) and SELL entries to Premium zones (>= 58% of dealing range); (3) After a liquidity sweep, require a confirmed displacement (strong expansion body + volume/FVG follow-through) rather than entering blindly on the initial reclaim candle.',
-    'CRITICAL RULE: Do NOT use, mention, or rely on lagging indicators such as RSI, MACD, EMA, SMA, Stochastics, or Bollinger Bands.',
-    'Select the single best signalTimeframe (one of: 1M, 5M, 15M, 1H, 4H) where the cleanest price-action entry trigger and risk-to-reward setup is currently aligned.',
-    'Provide a concise timeframeAlignment array covering all 5 timeframes (4H, 1H, 15M, 5M, 1M).',
-    `All price levels must be realistic relative to currentPrice (${currentPrice}) and rounded to ${instrument.decimals} decimal places.`,
-    'For a BUY signal: stopLoss < entryPrice < takeProfit1 < takeProfit2.',
-    'For a SELL signal: takeProfit2 < takeProfit1 < entryPrice < stopLoss.',
-    'If multi-timeframe structure conflicts, price is not in proper discount/premium, or post-sweep displacement is unconfirmed, output signal "WAIT" and explain which structural level or displacement must confirm first.',
-    'Never promise guaranteed profits.',
-  ].join(' ');
+  const { currentPrice, payloadJson, systemInstruction, userPrompt } =
+    buildMtfSignalPrompt({
+      symbol,
+      activeTimeframe,
+      timeframesData,
+    });
 
   let parsed: RawSignalJSON | null = null;
   let usedModel = PRIMARY_MODEL;
@@ -535,18 +447,16 @@ export async function generatePriceActionSignal(params: {
       usedModel = PRIMARY_MODEL;
     } catch (err) {
       lastError = err;
-      if (isQuotaError(err)) {
-        try {
-          parsed = await runGeminiModel(
-            ai,
-            FALLBACK_MODEL,
-            systemInstruction,
-            payloadJson
-          );
-          usedModel = FALLBACK_MODEL;
-        } catch (fallbackErr) {
-          lastError = fallbackErr;
-        }
+      try {
+        parsed = await runGeminiModel(
+          ai,
+          FALLBACK_MODEL,
+          systemInstruction,
+          payloadJson
+        );
+        usedModel = FALLBACK_MODEL;
+      } catch (fallbackErr) {
+        lastError = fallbackErr;
       }
     }
   }
@@ -556,7 +466,7 @@ export async function generatePriceActionSignal(params: {
       const groqRes = await runGroqFallback(
         groqKey,
         systemInstruction,
-        payloadJson
+        userPrompt
       );
       parsed = groqRes.data;
       usedModel = groqRes.model;
@@ -569,28 +479,13 @@ export async function generatePriceActionSignal(params: {
     throw formatProviderError(lastError);
   }
 
-  const resolvedSignalTf = normalizeTimeframe(
-    parsed.signalTimeframe || activeTimeframe,
-    activeTimeframe
-  );
-
-  const signal: AIPriceActionSignal = {
-    id: `sig-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+  const signal = normalizeSignalResult({
+    parsed,
     symbol: instrument.symbol,
-    timeframe: activeTimeframe,
-    signalTimeframe: resolvedSignalTf,
-    analyzedAt: new Date().toISOString(),
+    activeTimeframe,
+    currentPrice,
     model: usedModel,
-    spotPriceAtSignal: currentPrice,
-    bias: parsed.bias,
-    priceActionNarrative: parsed.priceActionNarrative,
-    keyZonesExplanation: parsed.keyZonesExplanation,
-    timeframeAlignment: (parsed.timeframeAlignment ?? []).map((item) => ({
-      ...item,
-      timeframe: normalizeTimeframe(item.timeframe, activeTimeframe),
-    })),
-    plan: parsed.plan,
-  };
+  });
 
   signalCache.set(instrument.symbol, {
     createdAt: Date.now(),
@@ -598,14 +493,6 @@ export async function generatePriceActionSignal(params: {
   });
 
   return signal;
-}
-
-interface RawBacktestReviewJSON {
-  verdict: 'Strong Edge' | 'Moderate Edge' | 'Needs Filtering';
-  summary: string;
-  bestPerformingPattern: string;
-  keyWeakness: string;
-  recommendations: string[];
 }
 
 async function runGeminiBacktestReview(
@@ -676,16 +563,7 @@ async function runGroqBacktestReview(
   systemInstruction: string,
   payloadJson: string
 ): Promise<{ data: RawBacktestReviewJSON; model: string }> {
-  const schemaPrompt = `${systemInstruction}
-
-Return ONLY valid JSON matching this exact shape:
-{
-  "verdict": "Strong Edge" | "Moderate Edge" | "Needs Filtering",
-  "summary": "string",
-  "bestPerformingPattern": "string",
-  "keyWeakness": "string",
-  "recommendations": ["string", "string", "string"]
-}`;
+  const schemaPrompt = `${systemInstruction}\n\n${BACKTEST_JSON_SCHEMA_HINT}`;
 
   return callGroqJson<RawBacktestReviewJSON>(
     groqApiKey,
@@ -707,45 +585,7 @@ export async function generateBacktestReview(
     );
   }
 
-  const payloadJson = JSON.stringify({
-    symbol: backtest.symbol,
-    timeframe: backtest.timeframe,
-    barsTested: backtest.barsTested,
-    nonRepaintingVerified: backtest.nonRepaintingVerified,
-    initialCapital: backtest.initialCapital,
-    finalEquity: backtest.finalEquity,
-    netReturnUsd: backtest.netReturnUsd,
-    netReturnPct: backtest.netReturnPct,
-    totalTrades: backtest.totalTrades,
-    wins: backtest.wins,
-    losses: backtest.losses,
-    breakevens: backtest.breakevens,
-    winRatePct: backtest.winRatePct,
-    profitFactor: backtest.profitFactor,
-    expectancyR: backtest.expectancyR,
-    maxDrawdownPct: backtest.maxDrawdownPct,
-    appliedFilters: backtest.appliedFilters ?? [],
-    filterStats: backtest.filterStats ?? null,
-    setupBreakdown: backtest.setupBreakdown,
-    recentTradesSample: backtest.trades.slice(0, 18).map((t) => ({
-      side: t.side,
-      setupType: t.setupType,
-      trigger: t.trigger,
-      exitReason: t.exitReason,
-      tp1Hit: t.tp1Hit,
-      rMultiple: t.rMultiple,
-      pnlUsd: t.pnlUsd,
-    })),
-  });
-
-  const systemInstruction = [
-    'You are an institutional quantitative price-action auditor.',
-    'Review the causal, non-repainting historical backtest results (closed-bar signals, next-bar Open execution, 50% TP1 partial + Breakeven stop, conservative SL-first intrabar simulation).',
-    'CRITICAL RULE: Pure price action only — NEVER suggest or mention lagging indicators like RSI, MACD, EMA, SMA, Stochastics, or Bollinger Bands.',
-    'Evaluate statistical quality objectively: profit factor, expectancy R, drawdown, and setup breakdown.',
-    'Classify verdict strictly as one of: "Strong Edge", "Moderate Edge", or "Needs Filtering".',
-    'Provide 3 specific, actionable pure price-action filtering recommendations (e.g., higher-timeframe bias alignment, liquidity sweep confirmation, discount/premium filtering).',
-  ].join(' ');
+  const { payloadJson, systemInstruction } = buildBacktestReviewPrompt(backtest);
 
   let parsed: RawBacktestReviewJSON | null = null;
   let usedModel = PRIMARY_MODEL;
@@ -763,18 +603,16 @@ export async function generateBacktestReview(
       usedModel = PRIMARY_MODEL;
     } catch (err) {
       lastError = err;
-      if (isQuotaError(err)) {
-        try {
-          parsed = await runGeminiBacktestReview(
-            ai,
-            FALLBACK_MODEL,
-            systemInstruction,
-            payloadJson
-          );
-          usedModel = FALLBACK_MODEL;
-        } catch (fallbackErr) {
-          lastError = fallbackErr;
-        }
+      try {
+        parsed = await runGeminiBacktestReview(
+          ai,
+          FALLBACK_MODEL,
+          systemInstruction,
+          payloadJson
+        );
+        usedModel = FALLBACK_MODEL;
+      } catch (fallbackErr) {
+        lastError = fallbackErr;
       }
     }
   }
@@ -797,24 +635,9 @@ export async function generateBacktestReview(
     throw formatProviderError(lastError);
   }
 
-  const normalizedVerdict: AIBacktestReview['verdict'] =
-    parsed.verdict === 'Strong Edge' ||
-    parsed.verdict === 'Moderate Edge' ||
-    parsed.verdict === 'Needs Filtering'
-      ? parsed.verdict
-      : backtest.profitFactor >= 1.5 && backtest.expectancyR > 0.25
-      ? 'Strong Edge'
-      : backtest.profitFactor >= 1.1
-      ? 'Moderate Edge'
-      : 'Needs Filtering';
-
-  return {
+  return normalizeBacktestReviewResult({
+    parsed,
+    backtest,
     model: usedModel,
-    reviewedAt: new Date().toISOString(),
-    verdict: normalizedVerdict,
-    summary: parsed.summary,
-    bestPerformingPattern: parsed.bestPerformingPattern,
-    keyWeakness: parsed.keyWeakness,
-    recommendations: (parsed.recommendations ?? []).slice(0, 4),
-  };
+  });
 }

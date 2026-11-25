@@ -1,3 +1,5 @@
+import { analyzePriceAction } from '../analysis/priceAction';
+import { getInstrumentBySymbol } from '../config/instruments';
 import type {
   AIBacktestReview,
   AIPriceActionSignal,
@@ -9,6 +11,10 @@ import type {
   Timeframe,
   WatchlistQuote,
 } from '../types/market';
+import {
+  generateBacktestReviewViaPuter,
+  generateSignalViaPuter,
+} from './puterFallback';
 
 export interface CandlesPayload extends MarketCandlesResponse {
   priceAction: PriceActionAnalysisSummary;
@@ -167,15 +173,69 @@ export async function requestPriceActionSignal(params: {
   timeframe: Timeframe;
   candles: OHLCVCandle[];
 }): Promise<SignalResponse> {
-  const res = await fetch('/api/analysis/signal', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  });
-  return parseJsonSafe<SignalResponse>(
-    res,
-    'Failed to generate AI price-action signal'
-  );
+  try {
+    const res = await fetch('/api/analysis/signal', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    return await parseJsonSafe<SignalResponse>(
+      res,
+      'Failed to generate AI price-action signal'
+    );
+  } catch (serverErr) {
+    const serverMessage =
+      serverErr instanceof Error
+        ? serverErr.message
+        : 'Server AI signal generation failed.';
+
+    try {
+      const instrument = getInstrumentBySymbol(params.symbol);
+      const orderedTfs: Timeframe[] = ['4H', '1H', '15M', '5M', '1M'];
+      const timeframesData = await Promise.all(
+        orderedTfs.map(async (tf) => {
+          if (tf === params.timeframe && params.candles.length >= 180) {
+            return {
+              timeframe: tf,
+              candles: params.candles,
+              analysis: analyzePriceAction(params.candles, instrument.decimals),
+            };
+          }
+          const loaded = await fetchMarketCandles(
+            instrument.symbol,
+            tf,
+            tf === '5M' ? 240 : 200
+          );
+          return {
+            timeframe: tf,
+            candles: loaded.candles,
+            analysis: loaded.priceAction,
+          };
+        })
+      );
+
+      const activeEntry =
+        timeframesData.find((t) => t.timeframe === params.timeframe) ??
+        timeframesData[0];
+
+      const signal = await generateSignalViaPuter({
+        symbol: instrument.symbol,
+        activeTimeframe: params.timeframe,
+        timeframesData,
+      });
+
+      return {
+        priceAction: activeEntry.analysis,
+        signal,
+      };
+    } catch (puterErr) {
+      const puterMessage =
+        puterErr instanceof Error ? puterErr.message : String(puterErr);
+      throw new Error(
+        `${serverMessage} Puter.js fallback also failed: ${puterMessage}`
+      );
+    }
+  }
 }
 
 export async function requestPriceActionBacktest(params: {
@@ -190,8 +250,28 @@ export async function requestPriceActionBacktest(params: {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
   });
-  return parseJsonSafe<BacktestResponse>(
+  const data = await parseJsonSafe<BacktestResponse>(
     res,
     'Failed to run causal price-action backtest'
   );
+
+  if (params.includeAiReview && !data.aiReview && data.aiError) {
+    try {
+      const puterReview = await generateBacktestReviewViaPuter(data.backtest);
+      return {
+        ...data,
+        aiReview: puterReview,
+        aiError: null,
+      };
+    } catch (puterErr) {
+      const puterMessage =
+        puterErr instanceof Error ? puterErr.message : String(puterErr);
+      return {
+        ...data,
+        aiError: `${data.aiError} Puter.js fallback also failed: ${puterMessage}`,
+      };
+    }
+  }
+
+  return data;
 }
