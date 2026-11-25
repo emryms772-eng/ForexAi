@@ -12,7 +12,17 @@ import type {
 
 const PRIMARY_MODEL = 'gemini-4-hydrogen';
 const FALLBACK_MODEL = 'gemini-3.1-flash-lite';
-const GROQ_FALLBACK_MODEL = 'llama-3.3-70b-versatile';
+const GROQ_PREFERRED_MODELS = [
+  'llama-3.3-70b-versatile',
+  'openai/gpt-oss-120b',
+  'meta-llama/llama-4-maverick-17b-128e-instruct',
+  'meta-llama/llama-4-scout-17b-16e-instruct',
+  'qwen/qwen3-32b',
+  'llama-3.1-8b-instant',
+  'openai/gpt-oss-20b',
+  'gemma2-9b-it',
+];
+const GROQ_MODELS_CACHE_TTL_MS = 5 * 60_000;
 const SIGNAL_CACHE_TTL_MS = 20_000;
 
 interface CachedSignalEntry {
@@ -267,11 +277,136 @@ async function runGeminiModel(
   return JSON.parse(rawText) as RawSignalJSON;
 }
 
+let cachedGroqModels: { fetchedAt: number; models: string[] } | null = null;
+
+function isChatModelId(id: string): boolean {
+  const lower = id.toLowerCase();
+  return !(
+    lower.includes('whisper') ||
+    lower.includes('guard') ||
+    lower.includes('tts') ||
+    lower.includes('orpheus') ||
+    lower.includes('embed') ||
+    lower.includes('safeguard')
+  );
+}
+
+async function getCandidateGroqModels(groqApiKey: string): Promise<string[]> {
+  if (
+    cachedGroqModels &&
+    Date.now() - cachedGroqModels.fetchedAt < GROQ_MODELS_CACHE_TTL_MS &&
+    cachedGroqModels.models.length > 0
+  ) {
+    return cachedGroqModels.models;
+  }
+
+  try {
+    const res = await fetch('https://api.groq.com/openai/v1/models', {
+      headers: { Authorization: `Bearer ${groqApiKey}` },
+    });
+    if (res.ok) {
+      const json = (await res.json()) as { data?: Array<{ id?: string }> };
+      const available = (json.data ?? [])
+        .map((m) => m.id)
+        .filter((id): id is string => Boolean(id) && isChatModelId(id!));
+
+      if (available.length > 0) {
+        const preferred = GROQ_PREFERRED_MODELS.filter((m) =>
+          available.includes(m)
+        );
+        const remaining = available.filter((m) => !preferred.includes(m));
+        const ordered = [...preferred, ...remaining];
+        cachedGroqModels = { fetchedAt: Date.now(), models: ordered };
+        return ordered;
+      }
+    }
+  } catch {
+    // Fall back to static preference list below if /models lookup fails
+  }
+
+  return GROQ_PREFERRED_MODELS;
+}
+
+function parseJsonResponse<T>(raw: string): T {
+  const cleaned = raw
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+  return JSON.parse(cleaned) as T;
+}
+
+async function callGroqJson<T>(
+  groqApiKey: string,
+  systemPrompt: string,
+  userContent: string,
+  label: string
+): Promise<{ data: T; model: string }> {
+  const candidates = await getCandidateGroqModels(groqApiKey);
+  let lastErrorText = '';
+  let lastStatus = 500;
+
+  for (const model of candidates) {
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${groqApiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userContent },
+        ],
+      }),
+    });
+
+    if (res.ok) {
+      const json = (await res.json()) as {
+        choices?: Array<{ message?: { content?: string } }>;
+      };
+      const content = json.choices?.[0]?.message?.content?.trim();
+      if (!content) {
+        lastErrorText = `Groq model ${model} returned an empty ${label} response.`;
+        continue;
+      }
+      return { data: parseJsonResponse<T>(content), model };
+    }
+
+    lastStatus = res.status;
+    lastErrorText = await res.text();
+
+    // Retry next accessible model if model is missing/disabled/unsupported
+    if (
+      res.status === 404 ||
+      res.status === 400 ||
+      lastErrorText.includes('model_not_found') ||
+      lastErrorText.includes('does not exist')
+    ) {
+      continue;
+    }
+
+    // Auth or rate-limit errors won't be fixed by switching models
+    break;
+  }
+
+  if (lastStatus === 401 || lastStatus === 403) {
+    throw new Error(
+      'Groq API key is invalid or unauthorized. Verify GROQ_API_KEY in Settings > Secrets (or add a GEMINI_API_KEY).'
+    );
+  }
+  throw new Error(
+    `Groq ${label} failed (${lastStatus}) across available models: ${lastErrorText}`
+  );
+}
+
 async function runGroqFallback(
   groqApiKey: string,
   systemInstruction: string,
   payloadJson: string
-): Promise<RawSignalJSON> {
+): Promise<{ data: RawSignalJSON; model: string }> {
   const schemaPrompt = `${systemInstruction}
 
 Return ONLY valid JSON matching this exact shape:
@@ -299,38 +434,12 @@ Return ONLY valid JSON matching this exact shape:
   }
 }`;
 
-  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${groqApiKey}`,
-    },
-    body: JSON.stringify({
-      model: GROQ_FALLBACK_MODEL,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: schemaPrompt },
-        {
-          role: 'user',
-          content: `Analyze all 5 timeframes (1M, 5M, 15M, 1H, 4H) of pure OHLC price action:\n${payloadJson}`,
-        },
-      ],
-    }),
-  });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Groq fallback failed (${res.status}): ${errText}`);
-  }
-
-  const json = (await res.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-  const content = json.choices?.[0]?.message?.content?.trim();
-  if (!content) {
-    throw new Error('Groq returned an empty price-action signal response.');
-  }
-  return JSON.parse(content) as RawSignalJSON;
+  return callGroqJson<RawSignalJSON>(
+    groqApiKey,
+    schemaPrompt,
+    `Analyze all 5 timeframes (1M, 5M, 15M, 1H, 4H) of pure OHLC price action:\n${payloadJson}`,
+    'price-action signal'
+  );
 }
 
 export async function generatePriceActionSignal(params: {
@@ -442,10 +551,15 @@ export async function generatePriceActionSignal(params: {
     }
   }
 
-  if (!parsed && groqKey && (lastError === null || isQuotaError(lastError))) {
+  if (!parsed && groqKey) {
     try {
-      parsed = await runGroqFallback(groqKey, systemInstruction, payloadJson);
-      usedModel = GROQ_FALLBACK_MODEL;
+      const groqRes = await runGroqFallback(
+        groqKey,
+        systemInstruction,
+        payloadJson
+      );
+      parsed = groqRes.data;
+      usedModel = groqRes.model;
     } catch (groqErr) {
       lastError = groqErr;
     }
@@ -561,7 +675,7 @@ async function runGroqBacktestReview(
   groqApiKey: string,
   systemInstruction: string,
   payloadJson: string
-): Promise<RawBacktestReviewJSON> {
+): Promise<{ data: RawBacktestReviewJSON; model: string }> {
   const schemaPrompt = `${systemInstruction}
 
 Return ONLY valid JSON matching this exact shape:
@@ -573,38 +687,12 @@ Return ONLY valid JSON matching this exact shape:
   "recommendations": ["string", "string", "string"]
 }`;
 
-  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${groqApiKey}`,
-    },
-    body: JSON.stringify({
-      model: GROQ_FALLBACK_MODEL,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: schemaPrompt },
-        {
-          role: 'user',
-          content: `Audit this causal pure price-action backtest:\n${payloadJson}`,
-        },
-      ],
-    }),
-  });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Groq backtest audit failed (${res.status}): ${errText}`);
-  }
-
-  const json = (await res.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-  const content = json.choices?.[0]?.message?.content?.trim();
-  if (!content) {
-    throw new Error('Groq returned an empty backtest audit response.');
-  }
-  return JSON.parse(content) as RawBacktestReviewJSON;
+  return callGroqJson<RawBacktestReviewJSON>(
+    groqApiKey,
+    schemaPrompt,
+    `Audit this causal pure price-action backtest:\n${payloadJson}`,
+    'backtest audit'
+  );
 }
 
 export async function generateBacktestReview(
@@ -691,14 +779,15 @@ export async function generateBacktestReview(
     }
   }
 
-  if (!parsed && groqKey && (lastError === null || isQuotaError(lastError))) {
+  if (!parsed && groqKey) {
     try {
-      parsed = await runGroqBacktestReview(
+      const groqRes = await runGroqBacktestReview(
         groqKey,
         systemInstruction,
         payloadJson
       );
-      usedModel = GROQ_FALLBACK_MODEL;
+      parsed = groqRes.data;
+      usedModel = groqRes.model;
     } catch (groqErr) {
       lastError = groqErr;
     }
