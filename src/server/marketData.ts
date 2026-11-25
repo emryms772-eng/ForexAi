@@ -35,6 +35,38 @@ function getBucketTime(unixSec: number, tfSeconds: number): number {
   return Math.floor(unixSec / tfSeconds) * tfSeconds;
 }
 
+function normalizeAscendingCandles(rawCandles: OHLCVCandle[]): OHLCVCandle[] {
+  const valid = rawCandles.filter(
+    (c) =>
+      Number.isFinite(c.time) &&
+      Number.isFinite(c.open) &&
+      Number.isFinite(c.high) &&
+      Number.isFinite(c.low) &&
+      Number.isFinite(c.close)
+  );
+  if (valid.length <= 1) return valid;
+
+  valid.sort((a, b) => a.time - b.time);
+
+  const deduped: OHLCVCandle[] = [];
+  for (const bar of valid) {
+    const prev = deduped[deduped.length - 1];
+    if (prev && prev.time === bar.time) {
+      deduped[deduped.length - 1] = {
+        time: bar.time,
+        open: prev.open,
+        high: Math.max(prev.high, bar.high),
+        low: Math.min(prev.low, bar.low),
+        close: bar.close,
+        volume: Math.max(prev.volume, bar.volume),
+      };
+    } else {
+      deduped.push(bar);
+    }
+  }
+  return deduped;
+}
+
 function hashSeed(input: string): number {
   let h = 2166136261;
   for (let i = 0; i < input.length; i++) {
@@ -116,7 +148,8 @@ async function fetchBinanceKlines(
         volume: Math.round(Number(row[5]) * 100) / 100,
       });
     }
-    return candles.length >= 30 ? candles : null;
+    const normalized = normalizeAscendingCandles(candles);
+    return normalized.length >= 30 ? normalized : null;
   } catch {
     return null;
   } finally {
@@ -185,11 +218,12 @@ async function fetchYahooChart(
       });
     }
 
-    if (rawCandles.length < 30) return null;
+    const ordered = normalizeAscendingCandles(rawCandles);
+    if (ordered.length < 30) return null;
     if (timeframe === '4H') {
       // Aggregate 1H Yahoo bars into 4H bars
       const aggregated: OHLCVCandle[] = [];
-      for (const bar of rawCandles) {
+      for (const bar of ordered) {
         const bucket = getBucketTime(bar.time, 14400);
         const last = aggregated[aggregated.length - 1];
         if (last && last.time === bucket) {
@@ -201,10 +235,10 @@ async function fetchYahooChart(
           aggregated.push({ ...bar, time: bucket });
         }
       }
-      return aggregated.slice(-limit);
+      return normalizeAscendingCandles(aggregated).slice(-limit);
     }
 
-    return rawCandles.slice(-limit);
+    return ordered.slice(-limit);
   } catch {
     return null;
   } finally {
@@ -377,7 +411,7 @@ export async function getMarketCandles(
   }
 
   const fetched = await loadUpstreamCandles(instrument, timeframe, limit);
-  const candles = fetched.candles;
+  const candles = normalizeAscendingCandles(fetched.candles);
   const anchorIdx = Math.max(0, candles.length - 48);
 
   seriesCache.set(cacheKey, {

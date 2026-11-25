@@ -62,10 +62,36 @@ export function CandlestickChart({
   const [showSignalLines, setShowSignalLines] = useState(true);
   const [hoveredBar, setHoveredBar] = useState<OHLCVCandle | null>(null);
 
+  const orderedCandles = useMemo(() => {
+    const valid = candles.filter(
+      (c) =>
+        Number.isFinite(c.time) &&
+        Number.isFinite(c.open) &&
+        Number.isFinite(c.high) &&
+        Number.isFinite(c.low) &&
+        Number.isFinite(c.close)
+    );
+    if (valid.length <= 1) return valid;
+
+    const sorted = valid.slice().sort((a, b) => a.time - b.time);
+    const deduped: OHLCVCandle[] = [];
+    for (const bar of sorted) {
+      const prev = deduped[deduped.length - 1];
+      if (prev && prev.time === bar.time) {
+        deduped[deduped.length - 1] = bar;
+      } else {
+        deduped.push(bar);
+      }
+    }
+    return deduped;
+  }, [candles]);
+
   const displayBar = useMemo(() => {
     if (hoveredBar) return hoveredBar;
-    return candles.length > 0 ? candles[candles.length - 1] : null;
-  }, [hoveredBar, candles]);
+    return orderedCandles.length > 0
+      ? orderedCandles[orderedCandles.length - 1]
+      : null;
+  }, [hoveredBar, orderedCandles]);
 
   // Initialize pure price-action Candlestick chart
   useEffect(() => {
@@ -153,7 +179,7 @@ export function CandlestickChart({
         setHoveredBar(null);
         return;
       }
-      const match = candles.find((c) => c.time === param.time);
+      const match = orderedCandles.find((c) => c.time === param.time);
       setHoveredBar(match ?? null);
     };
 
@@ -161,7 +187,7 @@ export function CandlestickChart({
     return () => {
       chart.unsubscribeCrosshairMove(handler);
     };
-  }, [candles]);
+  }, [orderedCandles]);
 
   // Apply instrument price precision
   useEffect(() => {
@@ -181,12 +207,12 @@ export function CandlestickChart({
   useEffect(() => {
     const chart = chartRef.current;
     const candleSeries = candleSeriesRef.current;
-    if (!chart || !candleSeries || candles.length === 0) {
+    if (!chart || !candleSeries || orderedCandles.length === 0) {
       return;
     }
 
-    const datasetKey = `${symbol}:${timeframe}:${candles[0].time}`;
-    const lastBar = candles[candles.length - 1];
+    const datasetKey = `${symbol}:${timeframe}:${orderedCandles[0].time}`;
+    const lastBar = orderedCandles[orderedCandles.length - 1];
     const isFullReset =
       lastDatasetKeyRef.current !== datasetKey ||
       lastBarTimeRef.current === 0 ||
@@ -194,7 +220,7 @@ export function CandlestickChart({
 
     if (isFullReset) {
       candleSeries.setData(
-        candles.map((c) => ({
+        orderedCandles.map((c) => ({
           time: c.time as UTCTimestamp,
           open: c.open,
           high: c.high,
@@ -215,7 +241,7 @@ export function CandlestickChart({
       });
       lastBarTimeRef.current = lastBar.time;
     }
-  }, [symbol, timeframe, candles]);
+  }, [symbol, timeframe, orderedCandles]);
 
   // Plot Pure Price Action Markers (BOS, CHoCH, Sweep, Engulfing, Pin Bar)
   useEffect(() => {
@@ -227,13 +253,17 @@ export function CandlestickChart({
       return;
     }
 
-    const formatted: SeriesMarker<Time>[] = priceAction.markers.map((m) => ({
-      time: m.time as UTCTimestamp,
-      position: m.position,
-      color: m.color,
-      shape: m.shape,
-      text: m.text,
-    }));
+    const formatted: SeriesMarker<Time>[] = priceAction.markers
+      .filter((m) => Number.isFinite(m.time))
+      .slice()
+      .sort((a, b) => a.time - b.time)
+      .map((m) => ({
+        time: m.time as UTCTimestamp,
+        position: m.position,
+        color: m.color,
+        shape: m.shape,
+        text: m.text,
+      }));
 
     plugin.setMarkers(formatted);
   }, [showMarkers, priceAction.markers]);
@@ -420,7 +450,7 @@ export function CandlestickChart({
   return (
     <div className="rounded-lg border border-slate-800/90 bg-[#0B0F17] overflow-hidden">
       {/* Pure Price Action Chart Toolbar */}
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/90 bg-[#111722] px-4 py-2.5">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/90 bg-[#111722] px-3 py-2 sm:px-4">
         <div
           role="group"
           aria-label="Chart timeframe"
@@ -433,7 +463,7 @@ export function CandlestickChart({
                 key={tf}
                 type="button"
                 onClick={() => onTimeframeChange(tf)}
-                className={`rounded px-2.5 py-1 text-xs font-mono font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                className={`min-h-[34px] sm:min-h-0 rounded px-2.5 py-1 text-xs font-mono font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   active
                     ? 'bg-blue-600 text-white'
                     : 'text-slate-400 hover:text-slate-100'
@@ -445,11 +475,11 @@ export function CandlestickChart({
           })}
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar max-w-full">
           <button
             type="button"
             onClick={() => setShowSR((v) => !v)}
-            className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            className={`inline-flex min-h-[34px] sm:min-h-0 items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               showSR
                 ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
                 : 'border-slate-800 bg-[#0B0F17] text-slate-400 hover:text-slate-200'
@@ -460,13 +490,13 @@ export function CandlestickChart({
             ) : (
               <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
             )}
-            <span>S/R &amp; 50% EQ</span>
+            <span>S/R</span>
           </button>
 
           <button
             type="button"
             onClick={() => setShowZones((v) => !v)}
-            className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            className={`inline-flex min-h-[34px] sm:min-h-0 items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               showZones
                 ? 'border-sky-500/40 bg-sky-500/10 text-sky-300'
                 : 'border-slate-800 bg-[#0B0F17] text-slate-400 hover:text-slate-200'
@@ -477,13 +507,13 @@ export function CandlestickChart({
             ) : (
               <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
             )}
-            <span>OB / FVG</span>
+            <span>OB/FVG</span>
           </button>
 
           <button
             type="button"
             onClick={() => setShowMarkers((v) => !v)}
-            className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            className={`inline-flex min-h-[34px] sm:min-h-0 items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               showMarkers
                 ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
                 : 'border-slate-800 bg-[#0B0F17] text-slate-400 hover:text-slate-200'
@@ -494,7 +524,7 @@ export function CandlestickChart({
             ) : (
               <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
             )}
-            <span>BOS / Patterns</span>
+            <span>BOS</span>
           </button>
 
           {((activeSignal && activeSignal.symbol === symbol) ||
@@ -502,7 +532,7 @@ export function CandlestickChart({
             <button
               type="button"
               onClick={() => setShowSignalLines((v) => !v)}
-              className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              className={`inline-flex min-h-[34px] sm:min-h-0 items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 showSignalLines
                   ? 'border-blue-500/40 bg-blue-500/15 text-blue-300'
                   : 'border-slate-800 bg-[#0B0F17] text-slate-400 hover:text-slate-200'
@@ -513,7 +543,7 @@ export function CandlestickChart({
               ) : (
                 <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
               )}
-              <span>Trade Lines</span>
+              <span>Lines</span>
             </button>
           )}
 
@@ -521,7 +551,7 @@ export function CandlestickChart({
             type="button"
             onClick={handleResetView}
             title="Fit candles to viewport"
-            className="inline-flex items-center gap-1.5 rounded-md border border-slate-800 bg-[#0B0F17] px-2.5 py-1 text-xs font-medium text-slate-300 transition-colors hover:border-slate-700 hover:text-white whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex min-h-[34px] sm:min-h-0 items-center gap-1 rounded-md border border-slate-800 bg-[#0B0F17] px-2.5 py-1 text-xs font-medium text-slate-300 transition-colors hover:border-slate-700 hover:text-white whitespace-nowrap shrink-0 cursor-pointer"
           >
             <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
             <span>Fit</span>
@@ -529,13 +559,10 @@ export function CandlestickChart({
         </div>
       </div>
 
-      {/* Pure OHLC Candlestick Viewport */}
-      <div className="relative h-[430px] sm:h-[480px] w-full bg-[#0B0F17]">
-        {displayBar && (
-          <div className="pointer-events-none absolute left-3 top-2.5 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 rounded bg-[#0B0F17]/85 px-2.5 py-1 text-[11px] font-mono tabular-nums backdrop-blur-xs">
-            <span className="font-semibold text-slate-200">
-              {symbol} · {timeframe}
-            </span>
+      {/* Compact OHLC Readout Row */}
+      {displayBar && (
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b border-slate-800/70 bg-[#0D121C] px-3 py-1.5 sm:px-4 text-[11px] font-mono tabular-nums">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
             <span className="text-slate-400">
               O <span className="text-slate-100">{displayBar.open.toFixed(decimals)}</span>
             </span>
@@ -548,25 +575,19 @@ export function CandlestickChart({
             <span className="text-slate-400">
               C <span className="text-slate-100">{displayBar.close.toFixed(decimals)}</span>
             </span>
-            <span className="text-slate-400">
-              Range{' '}
-              <span className="text-slate-200">
-                {(displayBar.high - displayBar.low).toFixed(decimals)}
-              </span>
-            </span>
-            <span className="text-sky-400">
-              {priceAction.snapshot.latestStructureEvent}
-            </span>
-            <span className="text-emerald-400">
-              Non-Repainting (Closed Bars)
-            </span>
           </div>
-        )}
+          <span className="text-sky-400 whitespace-nowrap">
+            {priceAction.snapshot.latestStructureEvent}
+          </span>
+        </div>
+      )}
 
-        {isLoading && candles.length === 0 && (
+      {/* Pure OHLC Candlestick Viewport */}
+      <div className="relative h-[320px] sm:h-[430px] xl:h-[480px] w-full bg-[#0B0F17]">
+        {isLoading && orderedCandles.length === 0 && (
           <div className="absolute inset-0 z-20 flex items-center justify-center bg-[#0B0F17]/80">
             <div className="text-xs font-mono text-slate-400">
-              Loading {symbol} {timeframe} raw price action...
+              Loading {symbol} {timeframe}...
             </div>
           </div>
         )}

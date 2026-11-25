@@ -5,6 +5,7 @@ import { BacktestPanel } from './components/BacktestPanel';
 import { CandlestickChart } from './components/CandlestickChart';
 import { DemoTradingPanel } from './components/DemoTradingPanel';
 import { LivePriceHeader } from './components/LivePriceHeader';
+import { MobileBottomNav } from './components/MobileBottomNav';
 import { PriceActionStructureStrip } from './components/PriceActionStructureStrip';
 import { PriceActionZonesPanel } from './components/PriceActionZonesPanel';
 import { RiskDisclaimerBanner } from './components/RiskDisclaimerBanner';
@@ -43,6 +44,7 @@ export default function App() {
   const [selectedSymbol, setSelectedSymbol] = useState<string>('XAU/USD');
   const [timeframe, setTimeframe] = useState<Timeframe>('5M');
   const [activeSection, setActiveSection] = useState<NavSectionId>('workspace');
+  const [isMobileMarketsOpen, setIsMobileMarketsOpen] = useState<boolean>(false);
 
   const [watchlist, setWatchlist] = useState<WatchlistQuote[]>([]);
   const [watchlistLoading, setWatchlistLoading] = useState<boolean>(true);
@@ -416,8 +418,7 @@ export default function App() {
 
   const handleNavigate = (section: NavSectionId) => {
     setActiveSection(section);
-    const target = document.getElementById(section);
-    target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handleRunBacktest = useCallback(
@@ -457,13 +458,12 @@ export default function App() {
   );
 
   const displayPrice = livePrice || instrument.basePrice;
-  const displayBid = bid || displayPrice;
-  const displayAsk = ask || displayPrice;
 
   return (
     <div className="min-h-screen bg-[#0B0F17] text-slate-100 flex flex-col">
       <TopNavBar
         activeSection={activeSection}
+        openPositionCount={demoAccount.openPositions.length}
         onNavigate={handleNavigate}
         onGenerateSignal={handleGenerateSignal}
         isAnalyzing={isAnalyzing}
@@ -478,6 +478,8 @@ export default function App() {
             setAiError(null);
           }}
           isLoading={watchlistLoading}
+          isMobileOpen={isMobileMarketsOpen}
+          onCloseMobile={() => setIsMobileMarketsOpen(false)}
         />
 
         <main id="workspace" className="flex-1 min-w-0 flex flex-col">
@@ -485,107 +487,119 @@ export default function App() {
             instrument={instrument}
             timeframe={timeframe}
             price={displayPrice}
-            bid={displayBid}
-            ask={displayAsk}
             changePct={changePct}
             sessionHigh={sessionStats.high}
             sessionLow={sessionStats.low}
-            avgCandleRange={priceAction.snapshot.avgCandleRange}
             isConnected={isStreamConnected}
-            source={source}
             sourceLabel={sourceLabel}
+            onOpenMarkets={() => setIsMobileMarketsOpen(true)}
           />
 
-          <div className="flex-1 space-y-5 p-4 sm:p-6">
+          <div className="flex-1 space-y-5 p-3.5 sm:p-6 pb-20 md:pb-6">
             {feedError && (
               <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-xs text-rose-200">
                 {feedError}
               </div>
             )}
 
-            {/* Primary Workspace Grid: Pure Price Action Chart Left, AI Signal Card Right */}
-            <div className="grid grid-cols-1 gap-5 xl:grid-cols-12 items-start">
-              <div className="space-y-4 xl:col-span-8">
-                <CandlestickChart
-                  symbol={selectedSymbol}
-                  timeframe={timeframe}
-                  decimals={instrument.decimals}
-                  candles={candles}
-                  priceAction={priceAction}
-                  activeSignal={activeSignal}
-                  openPosition={openPositionForSymbol}
-                  isLoading={candlesLoading}
-                  onTimeframeChange={setTimeframe}
-                />
+            {activeSection === 'workspace' && (
+              <div className="grid grid-cols-1 gap-4 sm:gap-5 xl:grid-cols-12 items-start">
+                <div className="space-y-4 xl:col-span-8">
+                  <CandlestickChart
+                    symbol={selectedSymbol}
+                    timeframe={timeframe}
+                    decimals={instrument.decimals}
+                    candles={candles}
+                    priceAction={priceAction}
+                    activeSignal={activeSignal}
+                    openPosition={openPositionForSymbol}
+                    isLoading={candlesLoading}
+                    onTimeframeChange={setTimeframe}
+                  />
 
-                <PriceActionStructureStrip
-                  snapshot={priceAction.snapshot}
-                  decimals={instrument.decimals}
-                />
+                  <PriceActionStructureStrip
+                    snapshot={priceAction.snapshot}
+                    decimals={instrument.decimals}
+                  />
+                </div>
+
+                <div className="xl:col-span-4">
+                  <AIAnalysisCard
+                    symbol={selectedSymbol}
+                    timeframe={timeframe}
+                    decimals={instrument.decimals}
+                    signal={activeSignal}
+                    isAnalyzing={isAnalyzing}
+                    error={aiError}
+                    onGenerateSignal={handleGenerateSignal}
+                    onSelectTimeframe={setTimeframe}
+                    onExecuteOnDemo={(sig) => handleExecuteSignalOnDemo(sig)}
+                  />
+                </div>
               </div>
+            )}
 
-              <div className="xl:col-span-4">
-                <AIAnalysisCard
-                  symbol={selectedSymbol}
-                  timeframe={timeframe}
-                  decimals={instrument.decimals}
-                  signal={activeSignal}
-                  isAnalyzing={isAnalyzing}
-                  error={aiError}
-                  onGenerateSignal={handleGenerateSignal}
-                  onSelectTimeframe={setTimeframe}
-                  onExecuteOnDemo={(sig) => handleExecuteSignalOnDemo(sig)}
-                />
-              </div>
-            </div>
+            {activeSection === 'demo' && (
+              <DemoTradingPanel
+                demoAccount={demoAccount}
+                activeSignal={activeSignal}
+                selectedSymbol={selectedSymbol}
+                nextScanSecondsLeft={nextScanSecondsLeft}
+                lastExecutionNote={lastExecutionNote}
+                onUpdateConfig={handleUpdateConfig}
+                onExecuteSignal={(sig) => handleExecuteSignalOnDemo(sig)}
+                onClosePosition={handleClosePosition}
+                onMoveToBreakeven={handleMoveToBreakeven}
+                onResetAccount={handleResetDemoAccount}
+                onSelectSymbol={(sym) => {
+                  setSelectedSymbol(sym);
+                  setAiError(null);
+                  setActiveSection('workspace');
+                }}
+              />
+            )}
 
-            <DemoTradingPanel
-              demoAccount={demoAccount}
-              activeSignal={activeSignal}
-              selectedSymbol={selectedSymbol}
-              nextScanSecondsLeft={nextScanSecondsLeft}
-              lastExecutionNote={lastExecutionNote}
-              onUpdateConfig={handleUpdateConfig}
-              onExecuteSignal={(sig) => handleExecuteSignalOnDemo(sig)}
-              onClosePosition={handleClosePosition}
-              onMoveToBreakeven={handleMoveToBreakeven}
-              onResetAccount={handleResetDemoAccount}
-              onSelectSymbol={(sym) => {
-                setSelectedSymbol(sym);
-                setAiError(null);
-              }}
-            />
+            {activeSection === 'backtest' && (
+              <BacktestPanel
+                symbol={selectedSymbol}
+                timeframe={timeframe}
+                riskPercentPerTrade={demoAccount.config.riskPercentPerTrade}
+                backtest={backtestResult}
+                aiReview={aiBacktestReview}
+                aiError={backtestAiError}
+                backtestError={backtestError}
+                isRunning={isBacktesting}
+                onRunBacktest={handleRunBacktest}
+              />
+            )}
 
-            <BacktestPanel
-              symbol={selectedSymbol}
-              timeframe={timeframe}
-              riskPercentPerTrade={demoAccount.config.riskPercentPerTrade}
-              backtest={backtestResult}
-              aiReview={aiBacktestReview}
-              aiError={backtestAiError}
-              backtestError={backtestError}
-              isRunning={isBacktesting}
-              onRunBacktest={handleRunBacktest}
-            />
-
-            <PriceActionZonesPanel
-              symbol={selectedSymbol}
-              decimals={instrument.decimals}
-              levels={priceAction.levels}
-              zones={priceAction.zones}
-              signalHistory={signalHistory}
-              onSelectSignal={(sig) => setActiveSignal(sig)}
-              onSelectSymbolTimeframe={(sym, tf) => {
-                setSelectedSymbol(sym);
-                setTimeframe(tf);
-                setAiError(null);
-              }}
-            />
+            {activeSection === 'levels' && (
+              <PriceActionZonesPanel
+                symbol={selectedSymbol}
+                decimals={instrument.decimals}
+                levels={priceAction.levels}
+                zones={priceAction.zones}
+                signalHistory={signalHistory}
+                onSelectSignal={(sig) => setActiveSignal(sig)}
+                onSelectSymbolTimeframe={(sym, tf) => {
+                  setSelectedSymbol(sym);
+                  setTimeframe(tf);
+                  setAiError(null);
+                  setActiveSection('workspace');
+                }}
+              />
+            )}
 
             <RiskDisclaimerBanner />
           </div>
         </main>
       </div>
+
+      <MobileBottomNav
+        activeSection={activeSection}
+        openPositionCount={demoAccount.openPositions.length}
+        onNavigate={handleNavigate}
+      />
     </div>
   );
 }

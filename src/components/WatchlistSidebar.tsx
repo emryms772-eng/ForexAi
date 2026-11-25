@@ -1,4 +1,4 @@
-import { ArrowDownRight, ArrowUpRight, Search } from 'lucide-react';
+import { ArrowDownRight, ArrowUpRight, Search, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import type { MarketCategory, WatchlistQuote } from '../types/market';
 
@@ -7,6 +7,8 @@ interface WatchlistSidebarProps {
   selectedSymbol: string;
   onSelectSymbol: (symbol: string) => void;
   isLoading: boolean;
+  isMobileOpen: boolean;
+  onCloseMobile: () => void;
 }
 
 const CATEGORY_FILTERS: Array<'All' | MarketCategory> = [
@@ -22,6 +24,8 @@ export function WatchlistSidebar({
   selectedSymbol,
   onSelectSymbol,
   isLoading,
+  isMobileOpen,
+  onCloseMobile,
 }: WatchlistSidebarProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<'All' | MarketCategory>('All');
@@ -40,14 +44,29 @@ export function WatchlistSidebar({
     });
   }, [quotes, searchQuery, categoryFilter]);
 
-  return (
-    <aside className="w-full lg:w-64 xl:w-72 shrink-0 border-b lg:border-b-0 lg:border-r border-slate-800/90 bg-[#0D121C]">
+  const handleSelect = (symbol: string) => {
+    onSelectSymbol(symbol);
+    onCloseMobile();
+  };
+
+  const panelBody = (
+    <>
       <div className="p-4 border-b border-slate-800/80 space-y-3">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-slate-100">Markets Watchlist</h2>
-          <span className="text-xs font-mono tabular-nums text-slate-400">
-            {quotes.length} pairs
-          </span>
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-baseline gap-2">
+            <h2 className="text-sm font-semibold text-slate-100">Markets</h2>
+            <span className="text-xs font-mono tabular-nums text-slate-400">
+              {quotes.length} pairs
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={onCloseMobile}
+            aria-label="Close markets list"
+            className="lg:hidden flex h-9 w-9 items-center justify-center rounded-md text-slate-400 hover:bg-slate-800 hover:text-slate-100 cursor-pointer"
+          >
+            <X className="h-4 w-4" aria-hidden="true" />
+          </button>
         </div>
 
         <div className="relative">
@@ -59,9 +78,9 @@ export function WatchlistSidebar({
             type="search"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Filter symbol or asset..."
+            placeholder="Search pair..."
             aria-label="Filter instruments"
-            className="w-full rounded-md border border-slate-800 bg-[#0B0F17] py-1.5 pl-8 pr-3 text-xs text-slate-100 placeholder:text-slate-500 focus:border-blue-500 focus:outline-none"
+            className="w-full min-h-[38px] rounded-md border border-slate-800 bg-[#0B0F17] py-1.5 pl-8 pr-3 text-xs text-slate-100 placeholder:text-slate-500 focus:border-blue-500 focus:outline-none"
           />
         </div>
 
@@ -77,7 +96,7 @@ export function WatchlistSidebar({
                 key={cat}
                 type="button"
                 onClick={() => setCategoryFilter(cat)}
-                className={`rounded px-1 py-1 text-[10px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                className={`min-h-[30px] rounded px-1 py-1 text-[10px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   active
                     ? 'bg-slate-800 text-slate-50'
                     : 'text-slate-400 hover:text-slate-200'
@@ -90,7 +109,7 @@ export function WatchlistSidebar({
         </div>
       </div>
 
-      <div className="divide-y divide-slate-800/60 max-h-[320px] lg:max-h-[calc(100vh-11rem)] overflow-y-auto">
+      <div className="divide-y divide-slate-800/60 overflow-y-auto flex-1 lg:max-h-[calc(100vh-11.5rem)]">
         {isLoading && quotes.length === 0 ? (
           <div className="p-4 space-y-3">
             {Array.from({ length: 5 }).map((_, i) => (
@@ -122,10 +141,10 @@ export function WatchlistSidebar({
               <button
                 key={quote.symbol}
                 type="button"
-                onClick={() => onSelectSymbol(quote.symbol)}
-                className={`w-full px-4 py-3 text-left transition-colors duration-150 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 ${
+                onClick={() => handleSelect(quote.symbol)}
+                className={`w-full min-h-[56px] px-4 py-3 text-left transition-colors duration-150 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 ${
                   isSelected
-                    ? 'bg-slate-800/60'
+                    ? 'bg-slate-800/70'
                     : 'hover:bg-slate-800/30'
                 }`}
               >
@@ -144,7 +163,6 @@ export function WatchlistSidebar({
 
                 <div className="mt-1 flex items-center justify-between gap-2 text-xs">
                   <span className="truncate text-slate-400">
-                    {quote.category} <span aria-hidden="true">·</span>{' '}
                     {quote.structureHint || quote.name}
                   </span>
                   <span
@@ -166,6 +184,32 @@ export function WatchlistSidebar({
           })
         )}
       </div>
-    </aside>
+    </>
+  );
+
+  return (
+    <>
+      {/* Desktop persistent left sidebar */}
+      <aside className="hidden lg:flex lg:flex-col w-64 xl:w-72 shrink-0 border-r border-slate-800/90 bg-[#0D121C]">
+        {panelBody}
+      </aside>
+
+      {/* Mobile/Tablet bottom-sheet market switcher */}
+      {isMobileOpen && (
+        <div
+          className="lg:hidden fixed inset-0 z-40 flex items-end bg-black/60 backdrop-blur-xs"
+          onClick={onCloseMobile}
+        >
+          <aside
+            aria-label="Select trading pair"
+            onClick={(e) => e.stopPropagation()}
+            className="flex max-h-[82vh] w-full flex-col rounded-t-2xl border-t border-slate-700/80 bg-[#0D121C]"
+          >
+            <div className="mx-auto mt-2.5 h-1 w-10 rounded-full bg-slate-700" />
+            {panelBody}
+          </aside>
+        </div>
+      )}
+    </>
   );
 }
