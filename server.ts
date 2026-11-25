@@ -16,10 +16,10 @@ import {
   getWatchlistQuotes,
 } from './src/server/marketData.ts';
 import {
-  getWhatsAppConfigStatus,
-  sendWhatsAppSignalAlert,
-  sendWhatsAppTestMessage,
-} from './src/server/whatsapp.ts';
+  getSmsConfigStatus,
+  sendSmsSignalAlert,
+  sendSmsTestMessage,
+} from './src/server/sms.ts';
 import type {
   AIBacktestReview,
   AIPriceActionSignal,
@@ -269,29 +269,29 @@ async function startServer() {
     }
   });
 
-  app.get('/api/notifications/whatsapp', (_req, res) => {
-    res.json(getWhatsAppConfigStatus());
+  app.get('/api/notifications/sms', (_req, res) => {
+    res.json(getSmsConfigStatus());
   });
 
-  app.get('/api/notifications/whatsapp/status', (_req, res) => {
-    res.json(getWhatsAppConfigStatus());
+  app.get('/api/notifications/sms/status', (_req, res) => {
+    res.json(getSmsConfigStatus());
   });
 
-  app.post('/api/notifications/whatsapp/test', async (_req, res) => {
+  app.post('/api/notifications/sms/test', async (_req, res) => {
     try {
-      const result = await sendWhatsAppTestMessage();
+      const result = await sendSmsTestMessage();
       res.json({ ok: true, sent: true, provider: result.provider });
     } catch (error) {
       const message =
         error instanceof Error
           ? error.message
-          : 'Unable to send test WhatsApp alert.';
+          : 'Unable to send test SMS alert.';
       const status = message.includes('not configured') ? 400 : 500;
       res.status(status).json({ error: message });
     }
   });
 
-  app.post('/api/notifications/whatsapp', async (req, res) => {
+  app.post('/api/notifications/sms', async (req, res) => {
     try {
       const body = (req.body ?? {}) as {
         action?: unknown;
@@ -299,7 +299,7 @@ async function startServer() {
       };
 
       if (body.action === 'test') {
-        const result = await sendWhatsAppTestMessage();
+        const result = await sendSmsTestMessage();
         res.json({ ok: true, sent: true, provider: result.provider });
         return;
       }
@@ -318,17 +318,17 @@ async function startServer() {
         typeof sig.plan !== 'object' ||
         typeof sig.plan.signal !== 'string'
       ) {
-        res.status(400).json({ error: 'Invalid signal payload for WhatsApp alert.' });
+        res.status(400).json({ error: 'Invalid signal payload for SMS alert.' });
         return;
       }
 
-      const result = await sendWhatsAppSignalAlert(sig as AIPriceActionSignal);
+      const result = await sendSmsSignalAlert(sig as AIPriceActionSignal);
       res.json({ ok: true, ...result });
     } catch (error) {
       const message =
         error instanceof Error
           ? error.message
-          : 'Unable to send WhatsApp notification.';
+          : 'Unable to send SMS notification.';
       const status = message.includes('not configured') ? 400 : 500;
       res.status(status).json({ error: message });
     }

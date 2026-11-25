@@ -370,7 +370,7 @@ export function normalizeBacktestReviewResult(params: {
   };
 }
 
-export function formatWhatsAppSignalText(signal: AIPriceActionSignal): string {
+export function formatSmsSignalText(signal: AIPriceActionSignal): string {
   const instrument = getInstrumentBySymbol(signal.symbol);
   const d = instrument.decimals;
   const fmt = (val: number) => (val > 0 ? val.toFixed(d) : 'Watch');
@@ -381,17 +381,13 @@ export function formatWhatsAppSignalText(signal: AIPriceActionSignal): string {
   });
 
   const lines = [
-    `*StrataDesk 5M Signal* · ${signal.symbol}`,
-    `Action: *${plan.signal}* (${plan.signalStrength}) | Bias: ${signal.bias}`,
-    `Setup: ${plan.setupType}`,
+    `StrataDesk 5M | ${signal.symbol}`,
+    `${plan.signal} (${plan.signalStrength}) | ${plan.setupType}`,
+    `Entry: ${fmt(plan.entryPrice)} | SL: ${fmt(plan.stopLoss)}`,
+    `TP1: ${fmt(plan.takeProfit1)} | TP2: ${fmt(plan.takeProfit2)} (${plan.riskRewardRatio})`,
     `Trigger: ${plan.triggerPattern}`,
-    `Entry (5M): ${fmt(plan.entryPrice)} (${plan.entryZone})`,
-    `Stop Loss: ${fmt(plan.stopLoss)}`,
-    `TP1: ${fmt(plan.takeProfit1)} | TP2: ${fmt(plan.takeProfit2)}`,
-    `R:R: ${plan.riskRewardRatio} | Closed Spot: ${signal.spotPriceAtSignal.toFixed(d)}`,
     `Invalidation: ${plan.invalidationReason}`,
-    `Read: ${signal.priceActionNarrative}`,
-    `Verified: 4H-1M Closed-Bar Non-Repainting (${timestamp})`,
+    `Closed-Bar Non-Repainting (${timestamp})`,
   ];
 
   return lines.join('\n');

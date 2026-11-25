@@ -13,7 +13,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { useState } from 'react';
-import { formatWhatsAppSignalText } from '../analysis/mtfPrompt';
+import { formatSmsSignalText } from '../analysis/mtfPrompt';
 import type { AIPriceActionSignal, Timeframe } from '../types/market';
 
 interface AIAnalysisCardProps {
@@ -23,12 +23,12 @@ interface AIAnalysisCardProps {
   signal: AIPriceActionSignal | null;
   isAnalyzing: boolean;
   error: string | null;
-  whatsappConfigured?: boolean;
-  whatsappSending?: boolean;
+  smsConfigured?: boolean;
+  smsSending?: boolean;
   onGenerateSignal: () => void;
   onSelectTimeframe: (tf: Timeframe) => void;
   onExecuteOnDemo?: (signal: AIPriceActionSignal) => void;
-  onSendWhatsApp?: (signal: AIPriceActionSignal) => void;
+  onSendSms?: (signal: AIPriceActionSignal) => void;
 }
 
 export function AIAnalysisCard({
@@ -38,19 +38,19 @@ export function AIAnalysisCard({
   signal,
   isAnalyzing,
   error,
-  whatsappConfigured = false,
-  whatsappSending = false,
+  smsConfigured = false,
+  smsSending = false,
   onGenerateSignal,
   onSelectTimeframe,
   onExecuteOnDemo,
-  onSendWhatsApp,
+  onSendSms,
 }: AIAnalysisCardProps) {
   const [showBreakdown, setShowBreakdown] = useState(false);
   const [copiedAlert, setCopiedAlert] = useState(false);
 
-  const handleCopyWhatsAppAlert = async () => {
+  const handleCopySmsAlert = async () => {
     if (!signal) return;
-    const text = formatWhatsAppSignalText(signal);
+    const text = formatSmsSignalText(signal);
     try {
       await navigator.clipboard.writeText(text);
       setCopiedAlert(true);
@@ -259,7 +259,7 @@ export function AIAnalysisCard({
 
               <button
                 type="button"
-                onClick={handleCopyWhatsAppAlert}
+                onClick={handleCopySmsAlert}
                 className="inline-flex min-h-[40px] items-center justify-center gap-1.5 rounded-md border border-slate-700 bg-[#0B0F17] px-3 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-slate-500 hover:text-white whitespace-nowrap cursor-pointer"
               >
                 {copiedAlert ? (
@@ -267,23 +267,23 @@ export function AIAnalysisCard({
                 ) : (
                   <Copy className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
                 )}
-                <span>{copiedAlert ? 'Copied Alert' : 'Copy WhatsApp'}</span>
+                <span>{copiedAlert ? 'Copied SMS' : 'Copy SMS'}</span>
               </button>
 
-              {onSendWhatsApp && (
+              {onSendSms && (
                 <button
                   type="button"
-                  onClick={() => onSendWhatsApp(signal)}
-                  disabled={whatsappSending || !whatsappConfigured}
+                  onClick={() => onSendSms(signal)}
+                  disabled={smsSending || !smsConfigured}
                   title={
-                    whatsappConfigured
-                      ? 'Send this signal to your WhatsApp'
-                      : 'Configure WHATSAPP_TO_PHONE & provider credentials in Settings > Secrets'
+                    smsConfigured
+                      ? 'Send this signal via SMS'
+                      : 'Configure SMS_TO_PHONE & SMS provider credentials in Settings > Secrets'
                   }
                   className="inline-flex min-h-[40px] items-center justify-center gap-1.5 rounded-md border border-emerald-500/35 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-300 transition-colors hover:bg-emerald-500/20 disabled:opacity-45 whitespace-nowrap cursor-pointer"
                 >
                   <Send className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>{whatsappSending ? 'Sending...' : 'WhatsApp'}</span>
+                  <span>{smsSending ? 'Sending...' : 'Send SMS'}</span>
                 </button>
               )}
             </div>

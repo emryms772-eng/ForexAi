@@ -164,13 +164,13 @@ export interface AutoTradeConfig {
   autoScanIntervalSec: AutoScanIntervalSec;
   scanScope: AutoScanScope;
   riskPercentPerTrade: 0.5 | 1 | 2;
-  whatsappAlertsEnabled: boolean;
-  whatsappNotifyWait: boolean;
+  smsAlertsEnabled: boolean;
+  smsNotifyWait: boolean;
 }
 
-export interface WhatsAppConfigStatus {
+export interface SmsConfigStatus {
   configured: boolean;
-  provider: 'callmebot' | 'meta-cloud' | 'twilio' | 'none';
+  provider: 'twilio' | 'textbelt' | 'vonage' | 'none';
   recipientMasked: string | null;
 }
 

@@ -21,8 +21,8 @@ export function createInitialDemoState(): DemoAccountState {
       autoScanIntervalSec: 0,
       scanScope: 'active',
       riskPercentPerTrade: 1,
-      whatsappAlertsEnabled: true,
-      whatsappNotifyWait: true,
+      smsAlertsEnabled: true,
+      smsNotifyWait: true,
     },
   };
 }

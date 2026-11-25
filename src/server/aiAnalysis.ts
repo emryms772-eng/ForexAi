@@ -1,5 +1,9 @@
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import {
+  generateLocalBacktestReview,
+  generateLocalMtfSignal,
+} from '../analysis/localSignalEngine.ts';
+import {
   BACKTEST_JSON_SCHEMA_HINT,
   type RawBacktestReviewJSON,
   type RawSignalJSON,
@@ -418,12 +422,6 @@ export async function generatePriceActionSignal(params: {
   const geminiKey = getGeminiApiKey();
   const groqKey = getGroqApiKey();
 
-  if (!geminiKey && !groqKey) {
-    throw new Error(
-      'No AI API key configured. Add GEMINI_API_KEY (or optional GROQ_API_KEY) in Settings > Secrets or Vercel Environment Variables.'
-    );
-  }
-
   const { currentPrice, payloadJson, systemInstruction, userPrompt } =
     buildMtfSignalPrompt({
       symbol,
@@ -433,7 +431,6 @@ export async function generatePriceActionSignal(params: {
 
   let parsed: RawSignalJSON | null = null;
   let usedModel = PRIMARY_MODEL;
-  let lastError: unknown = null;
 
   if (geminiKey) {
     const ai = createGeminiClient(geminiKey);
@@ -445,8 +442,7 @@ export async function generatePriceActionSignal(params: {
         payloadJson
       );
       usedModel = PRIMARY_MODEL;
-    } catch (err) {
-      lastError = err;
+    } catch {
       try {
         parsed = await runGeminiModel(
           ai,
@@ -455,8 +451,8 @@ export async function generatePriceActionSignal(params: {
           payloadJson
         );
         usedModel = FALLBACK_MODEL;
-      } catch (fallbackErr) {
-        lastError = fallbackErr;
+      } catch {
+        // Fall through to Groq or Local MTF (Free Forever)
       }
     }
   }
@@ -470,22 +466,25 @@ export async function generatePriceActionSignal(params: {
       );
       parsed = groqRes.data;
       usedModel = groqRes.model;
-    } catch (groqErr) {
-      lastError = groqErr;
+    } catch {
+      // Fall through to Local MTF (Free Forever)
     }
   }
 
-  if (!parsed) {
-    throw formatProviderError(lastError);
-  }
-
-  const signal = normalizeSignalResult({
-    parsed,
-    symbol: instrument.symbol,
-    activeTimeframe,
-    currentPrice,
-    model: usedModel,
-  });
+  // Unlimited, 100% Free Forever closed-bar MTF price-action fallback
+  const signal = parsed
+    ? normalizeSignalResult({
+        parsed,
+        symbol: instrument.symbol,
+        activeTimeframe,
+        currentPrice,
+        model: usedModel,
+      })
+    : generateLocalMtfSignal({
+        symbol: instrument.symbol,
+        activeTimeframe,
+        timeframesData,
+      });
 
   signalCache.set(instrument.symbol, {
     createdAt: Date.now(),
@@ -579,17 +578,10 @@ export async function generateBacktestReview(
   const geminiKey = getGeminiApiKey();
   const groqKey = getGroqApiKey();
 
-  if (!geminiKey && !groqKey) {
-    throw new Error(
-      'No AI API key configured. Add GEMINI_API_KEY (or optional GROQ_API_KEY) in Settings > Secrets or Vercel Environment Variables.'
-    );
-  }
-
   const { payloadJson, systemInstruction } = buildBacktestReviewPrompt(backtest);
 
   let parsed: RawBacktestReviewJSON | null = null;
   let usedModel = PRIMARY_MODEL;
-  let lastError: unknown = null;
 
   if (geminiKey) {
     const ai = createGeminiClient(geminiKey);
@@ -601,8 +593,7 @@ export async function generateBacktestReview(
         payloadJson
       );
       usedModel = PRIMARY_MODEL;
-    } catch (err) {
-      lastError = err;
+    } catch {
       try {
         parsed = await runGeminiBacktestReview(
           ai,
@@ -611,8 +602,8 @@ export async function generateBacktestReview(
           payloadJson
         );
         usedModel = FALLBACK_MODEL;
-      } catch (fallbackErr) {
-        lastError = fallbackErr;
+      } catch {
+        // Fall through to Groq or Local Audit (Free Forever)
       }
     }
   }
@@ -626,13 +617,13 @@ export async function generateBacktestReview(
       );
       parsed = groqRes.data;
       usedModel = groqRes.model;
-    } catch (groqErr) {
-      lastError = groqErr;
+    } catch {
+      // Fall through to Local Audit (Free Forever)
     }
   }
 
   if (!parsed) {
-    throw formatProviderError(lastError);
+    return generateLocalBacktestReview(backtest);
   }
 
   return normalizeBacktestReviewResult({

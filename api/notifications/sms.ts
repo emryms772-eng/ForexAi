@@ -1,8 +1,8 @@
 import {
-  getWhatsAppConfigStatus,
-  sendWhatsAppSignalAlert,
-  sendWhatsAppTestMessage,
-} from '../../src/server/whatsapp.ts';
+  getSmsConfigStatus,
+  sendSmsSignalAlert,
+  sendSmsTestMessage,
+} from '../../src/server/sms.ts';
 import type { AIPriceActionSignal } from '../../src/types/market.ts';
 
 interface ServerlessRequest {
@@ -34,7 +34,7 @@ export default async function handler(
   res: ServerlessResponse
 ) {
   if (req.method === 'GET') {
-    res.status(200).json(getWhatsAppConfigStatus());
+    res.status(200).json(getSmsConfigStatus());
     return;
   }
 
@@ -52,23 +52,23 @@ export default async function handler(
     };
 
     if (body.action === 'test') {
-      const result = await sendWhatsAppTestMessage();
+      const result = await sendSmsTestMessage();
       res.status(200).json({ ok: true, sent: true, provider: result.provider });
       return;
     }
 
     if (!isValidSignalPayload(body.signal)) {
-      res.status(400).json({ error: 'Invalid signal payload for WhatsApp alert.' });
+      res.status(400).json({ error: 'Invalid signal payload for SMS alert.' });
       return;
     }
 
-    const result = await sendWhatsAppSignalAlert(body.signal);
+    const result = await sendSmsSignalAlert(body.signal);
     res.status(200).json({ ok: true, ...result });
   } catch (error) {
     const message =
       error instanceof Error
         ? error.message
-        : 'Unable to send WhatsApp notification.';
+        : 'Unable to send SMS notification.';
     const status = message.includes('not configured') ? 400 : 500;
     res.status(status).json({ error: message });
   }

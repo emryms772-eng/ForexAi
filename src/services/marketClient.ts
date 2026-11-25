@@ -1,3 +1,7 @@
+import {
+  generateLocalBacktestReview,
+  generateLocalMtfSignal,
+} from '../analysis/localSignalEngine';
 import { analyzePriceAction } from '../analysis/priceAction';
 import { getInstrumentBySymbol } from '../config/instruments';
 import type {
@@ -8,14 +12,10 @@ import type {
   MarketTickEvent,
   OHLCVCandle,
   PriceActionAnalysisSummary,
+  SmsConfigStatus,
   Timeframe,
   WatchlistQuote,
-  WhatsAppConfigStatus,
 } from '../types/market';
-import {
-  generateBacktestReviewViaPuter,
-  generateSignalViaPuter,
-} from './puterFallback';
 
 export interface CandlesPayload extends MarketCandlesResponse {
   priceAction: PriceActionAnalysisSummary;
@@ -219,7 +219,7 @@ export async function requestPriceActionSignal(params: {
         timeframesData.find((t) => t.timeframe === params.timeframe) ??
         timeframesData[0];
 
-      const signal = await generateSignalViaPuter({
+      const signal = generateLocalMtfSignal({
         symbol: instrument.symbol,
         activeTimeframe: params.timeframe,
         timeframesData,
@@ -229,12 +229,10 @@ export async function requestPriceActionSignal(params: {
         priceAction: activeEntry.analysis,
         signal,
       };
-    } catch (puterErr) {
-      const puterMessage =
-        puterErr instanceof Error ? puterErr.message : String(puterErr);
-      throw new Error(
-        `${serverMessage} Puter.js fallback also failed: ${puterMessage}`
-      );
+    } catch (localErr) {
+      const localMessage =
+        localErr instanceof Error ? localErr.message : String(localErr);
+      throw new Error(`${serverMessage} Local MTF fallback failed: ${localMessage}`);
     }
   }
 }
@@ -256,39 +254,29 @@ export async function requestPriceActionBacktest(params: {
     'Failed to run causal price-action backtest'
   );
 
-  if (params.includeAiReview && !data.aiReview && data.aiError) {
-    try {
-      const puterReview = await generateBacktestReviewViaPuter(data.backtest);
-      return {
-        ...data,
-        aiReview: puterReview,
-        aiError: null,
-      };
-    } catch (puterErr) {
-      const puterMessage =
-        puterErr instanceof Error ? puterErr.message : String(puterErr);
-      return {
-        ...data,
-        aiError: `${data.aiError} Puter.js fallback also failed: ${puterMessage}`,
-      };
-    }
+  if (params.includeAiReview && !data.aiReview) {
+    return {
+      ...data,
+      aiReview: generateLocalBacktestReview(data.backtest),
+      aiError: null,
+    };
   }
 
   return data;
 }
 
-export async function fetchWhatsAppStatus(): Promise<WhatsAppConfigStatus> {
-  const res = await fetch('/api/notifications/whatsapp');
-  return parseJsonSafe<WhatsAppConfigStatus>(
+export async function fetchSmsStatus(): Promise<SmsConfigStatus> {
+  const res = await fetch('/api/notifications/sms');
+  return parseJsonSafe<SmsConfigStatus>(
     res,
-    'Failed to check WhatsApp alert status'
+    'Failed to check SMS alert status'
   );
 }
 
-export async function sendWhatsAppSignalAlert(
+export async function sendSmsSignalAlert(
   signal: AIPriceActionSignal
 ): Promise<{ ok: boolean; sent?: boolean; deduplicated?: boolean; provider?: string }> {
-  const res = await fetch('/api/notifications/whatsapp', {
+  const res = await fetch('/api/notifications/sms', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ signal }),
@@ -298,21 +286,21 @@ export async function sendWhatsAppSignalAlert(
     sent?: boolean;
     deduplicated?: boolean;
     provider?: string;
-  }>(res, 'Failed to send WhatsApp signal alert');
+  }>(res, 'Failed to send SMS signal alert');
 }
 
-export async function sendWhatsAppTestAlert(): Promise<{
+export async function sendSmsTestAlert(): Promise<{
   ok: boolean;
   sent?: boolean;
   provider?: string;
 }> {
-  const res = await fetch('/api/notifications/whatsapp', {
+  const res = await fetch('/api/notifications/sms', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action: 'test' }),
   });
   return parseJsonSafe<{ ok: boolean; sent?: boolean; provider?: string }>(
     res,
-    'Failed to send test WhatsApp message'
+    'Failed to send test SMS message'
   );
 }

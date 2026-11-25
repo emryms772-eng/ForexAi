@@ -23,12 +23,12 @@ import {
 } from './engine/demoBroker';
 import {
   fetchMarketCandles,
+  fetchSmsStatus,
   fetchWatchlistQuotes,
-  fetchWhatsAppStatus,
   requestPriceActionBacktest,
   requestPriceActionSignal,
-  sendWhatsAppSignalAlert,
-  sendWhatsAppTestAlert,
+  sendSmsSignalAlert,
+  sendSmsTestAlert,
   subscribeMarketStream,
 } from './services/marketClient';
 import type {
@@ -39,9 +39,9 @@ import type {
   DemoAccountState,
   FeedOrigin,
   OHLCVCandle,
+  SmsConfigStatus,
   Timeframe,
   WatchlistQuote,
-  WhatsAppConfigStatus,
 } from './types/market';
 
 export default function App() {
@@ -91,9 +91,8 @@ export default function App() {
   const [backtestError, setBacktestError] = useState<string | null>(null);
   const [isBacktesting, setIsBacktesting] = useState<boolean>(false);
 
-  const [whatsappStatus, setWhatsappStatus] =
-    useState<WhatsAppConfigStatus | null>(null);
-  const [whatsappSending, setWhatsappSending] = useState<boolean>(false);
+  const [smsStatus, setSmsStatus] = useState<SmsConfigStatus | null>(null);
+  const [smsSending, setSmsSending] = useState<boolean>(false);
 
   const candlesRef = useRef<OHLCVCandle[]>([]);
   candlesRef.current = candles;
@@ -105,8 +104,8 @@ export default function App() {
   isAnalyzingRef.current = isAnalyzing;
   const demoConfigRef = useRef<AutoTradeConfig>(demoAccount.config);
   demoConfigRef.current = demoAccount.config;
-  const whatsappStatusRef = useRef<WhatsAppConfigStatus | null>(null);
-  whatsappStatusRef.current = whatsappStatus;
+  const smsStatusRef = useRef<SmsConfigStatus | null>(null);
+  smsStatusRef.current = smsStatus;
   const scanCursorRef = useRef<number>(0);
 
   // Persist demo account updates
@@ -114,16 +113,16 @@ export default function App() {
     saveDemoAccountState(demoAccount);
   }, [demoAccount]);
 
-  // Load server-side WhatsApp notification status on mount
+  // Load server-side SMS notification status on mount
   useEffect(() => {
     let active = true;
-    fetchWhatsAppStatus()
+    fetchSmsStatus()
       .then((status) => {
-        if (active) setWhatsappStatus(status);
+        if (active) setSmsStatus(status);
       })
       .catch(() => {
         if (active) {
-          setWhatsappStatus({
+          setSmsStatus({
             configured: false,
             provider: 'none',
             recipientMasked: null,
@@ -375,30 +374,30 @@ export default function App() {
           return res.nextState;
         });
 
-        // Automatically send every Auto-Scan signal to WhatsApp when enabled & configured
+        // Automatically send every Auto-Scan signal via SMS when enabled & configured
         const cfg = demoConfigRef.current;
-        if (isAutoScan && cfg.whatsappAlertsEnabled) {
+        if (isAutoScan && cfg.smsAlertsEnabled) {
           const shouldSend =
-            cfg.whatsappNotifyWait || result.signal.plan.signal !== 'WAIT';
+            cfg.smsNotifyWait || result.signal.plan.signal !== 'WAIT';
           if (shouldSend) {
-            if (whatsappStatusRef.current?.configured) {
+            if (smsStatusRef.current?.configured) {
               try {
-                const waRes = await sendWhatsAppSignalAlert(result.signal);
-                if (waRes.sent) {
+                const smsRes = await sendSmsSignalAlert(result.signal);
+                if (smsRes.sent) {
                   setLastExecutionNote(
-                    `WhatsApp alert sent for ${result.signal.symbol} (${result.signal.plan.signal} 5M).`
+                    `SMS alert sent for ${result.signal.symbol} (${result.signal.plan.signal} 5M).`
                   );
                 }
-              } catch (waErr) {
+              } catch (smsErr) {
                 const msg =
-                  waErr instanceof Error
-                    ? waErr.message
-                    : 'WhatsApp delivery failed.';
-                setLastExecutionNote(`Auto-Scan WhatsApp alert error: ${msg}`);
+                  smsErr instanceof Error
+                    ? smsErr.message
+                    : 'SMS delivery failed.';
+                setLastExecutionNote(`Auto-Scan SMS alert error: ${msg}`);
               }
             } else {
               setLastExecutionNote(
-                `Auto-Scan complete (${result.signal.symbol} ${result.signal.plan.signal}) — add WhatsApp Secrets to receive alerts.`
+                `Auto-Scan complete (${result.signal.symbol} ${result.signal.plan.signal}) — add SMS Secrets to receive alerts.`
               );
             }
           }
@@ -420,44 +419,44 @@ export default function App() {
     void runSignalScan(selectedSymbol, timeframe, false);
   }, [runSignalScan, selectedSymbol, timeframe]);
 
-  const handleSendSignalToWhatsApp = useCallback(
+  const handleSendSignalToSms = useCallback(
     async (sig: AIPriceActionSignal) => {
-      if (whatsappSending) return;
-      setWhatsappSending(true);
+      if (smsSending) return;
+      setSmsSending(true);
       try {
-        const res = await sendWhatsAppSignalAlert(sig);
+        const res = await sendSmsSignalAlert(sig);
         setLastExecutionNote(
           res.deduplicated
-            ? `WhatsApp alert already sent recently for ${sig.symbol}.`
-            : `Sent ${sig.symbol} (${sig.plan.signal} 5M) signal to WhatsApp.`
+            ? `SMS alert already sent recently for ${sig.symbol}.`
+            : `Sent ${sig.symbol} (${sig.plan.signal} 5M) signal via SMS.`
         );
       } catch (err) {
         setLastExecutionNote(
-          err instanceof Error ? err.message : 'Failed to send WhatsApp alert.'
+          err instanceof Error ? err.message : 'Failed to send SMS alert.'
         );
       } finally {
-        setWhatsappSending(false);
+        setSmsSending(false);
       }
     },
-    [whatsappSending]
+    [smsSending]
   );
 
-  const handleTestWhatsApp = useCallback(async () => {
-    if (whatsappSending) return;
-    setWhatsappSending(true);
+  const handleTestSms = useCallback(async () => {
+    if (smsSending) return;
+    setSmsSending(true);
     try {
-      const res = await sendWhatsAppTestAlert();
+      const res = await sendSmsTestAlert();
       setLastExecutionNote(
-        `Test WhatsApp message sent via ${res.provider ?? 'configured provider'}.`
+        `Test SMS sent via ${res.provider ?? 'configured provider'}.`
       );
     } catch (err) {
       setLastExecutionNote(
-        err instanceof Error ? err.message : 'Failed to send test WhatsApp message.'
+        err instanceof Error ? err.message : 'Failed to send test SMS message.'
       );
     } finally {
-      setWhatsappSending(false);
+      setSmsSending(false);
     }
-  }, [whatsappSending]);
+  }, [smsSending]);
 
   // Autonomous Auto-Scan Timer Loop
   useEffect(() => {
@@ -636,12 +635,12 @@ export default function App() {
                     signal={activeSignal}
                     isAnalyzing={isAnalyzing}
                     error={aiError}
-                    whatsappConfigured={Boolean(whatsappStatus?.configured)}
-                    whatsappSending={whatsappSending}
+                    smsConfigured={Boolean(smsStatus?.configured)}
+                    smsSending={smsSending}
                     onGenerateSignal={handleGenerateSignal}
                     onSelectTimeframe={setTimeframe}
                     onExecuteOnDemo={(sig) => handleExecuteSignalOnDemo(sig)}
-                    onSendWhatsApp={handleSendSignalToWhatsApp}
+                    onSendSms={handleSendSignalToSms}
                   />
                 </div>
               </div>
@@ -654,9 +653,9 @@ export default function App() {
                 selectedSymbol={selectedSymbol}
                 nextScanSecondsLeft={nextScanSecondsLeft}
                 lastExecutionNote={lastExecutionNote}
-                whatsappStatus={whatsappStatus}
-                whatsappSending={whatsappSending}
-                onTestWhatsApp={handleTestWhatsApp}
+                smsStatus={smsStatus}
+                smsSending={smsSending}
+                onTestSms={handleTestSms}
                 onUpdateConfig={handleUpdateConfig}
                 onExecuteSignal={(sig) => handleExecuteSignalOnDemo(sig)}
                 onClosePosition={handleClosePosition}
