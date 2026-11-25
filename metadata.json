@@ -1,0 +1,6 @@
+{
+  "name": "StrataDesk",
+  "description": "AI-powered market structure and technical trade setup analysis workspace with live candlestick charting.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
