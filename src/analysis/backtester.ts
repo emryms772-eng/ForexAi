@@ -8,7 +8,7 @@ import type {
   PriceActionAnalysisSummary,
   Timeframe,
 } from '../types/market.ts';
-import { analyzePriceAction } from './priceAction.ts';
+import { analyzePriceAction, getClosedCandlesForTimeframe } from './priceAction.ts';
 
 function roundToDecimals(val: number, decimals: number): number {
   const factor = Math.pow(10, decimals);
@@ -700,6 +700,66 @@ function evaluateCausalSetupAtBar(params: {
   }
 
   return null;
+}
+
+export interface CausalSignalArrow {
+  time: number;
+  side: 'BUY' | 'SELL';
+  setupType: string;
+  trigger: string;
+}
+
+/**
+ * Detects strictly closed-bar, non-repainting BUY / SELL confirmation arrows
+ * across visible chart history. Never evaluates the forming unclosed candle.
+ */
+export function detectCausalSignalArrows(params: {
+  candles: OHLCVCandle[];
+  timeframe: Timeframe;
+  decimals: number;
+}): CausalSignalArrow[] {
+  const { candles, timeframe, decimals } = params;
+  const closedCandles = getClosedCandlesForTimeframe(candles, timeframe);
+  if (closedCandles.length < 45) return [];
+
+  const warmupBars = Math.min(45, Math.max(25, Math.floor(closedCandles.length * 0.25)));
+  const counters: FilterCounters = {
+    candidatesEvaluated: 0,
+    rejectedByHtfBias: 0,
+    rejectedByPremiumDiscount: 0,
+    rejectedByDisplacement: 0,
+    qualifiedSetups: 0,
+  };
+
+  const arrows: CausalSignalArrow[] = [];
+  let i = warmupBars;
+
+  while (i < closedCandles.length) {
+    const causalSlice = closedCandles.slice(0, i + 1);
+    const setup = evaluateCausalSetupAtBar({
+      closedSlice: causalSlice,
+      decimals,
+      timeframe,
+      htfAligned: false,
+      counters,
+    });
+
+    if (setup) {
+      arrows.push({
+        time: closedCandles[i].time,
+        side: setup.side,
+        setupType: setup.setupType,
+        trigger: setup.trigger,
+      });
+      // Space arrows cleanly by at least 4 closed bars to prevent marker clutter
+      i += 4;
+      continue;
+    }
+
+    i += 1;
+  }
+
+  return arrows;
 }
 
 export function runNonRepaintingBacktest(params: {

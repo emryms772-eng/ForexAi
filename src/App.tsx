@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { detectCausalSignalArrows } from './analysis/backtester';
 import {
   analyzePriceAction,
   getCandleProgress,
@@ -173,6 +174,16 @@ export default function App() {
         excludeFormingBar: false,
       }),
     [closedCandles, instrument.decimals]
+  );
+
+  const causalArrows = useMemo(
+    () =>
+      detectCausalSignalArrows({
+        candles: closedCandles,
+        timeframe,
+        decimals: instrument.decimals,
+      }),
+    [closedCandles, timeframe, instrument.decimals]
   );
 
   const openPositionForSymbol = useMemo(
@@ -675,6 +686,8 @@ export default function App() {
                     candles={candles}
                     priceAction={priceAction}
                     activeSignal={activeSignal}
+                    signalHistory={signalHistory}
+                    causalArrows={causalArrows}
                     openPosition={openPositionForSymbol}
                     isLoading={candlesLoading}
                     onTimeframeChange={setTimeframe}

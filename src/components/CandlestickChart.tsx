@@ -14,9 +14,10 @@ import {
 } from 'lightweight-charts';
 import { Eye, EyeOff, RotateCcw } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { CausalSignalArrow } from '../analysis/backtester';
 import { formatCountdown } from '../analysis/entryTiming';
 import { getCandleProgress } from '../analysis/priceAction';
-import { TIMEFRAMES } from '../config/instruments';
+import { TIMEFRAMES, TIMEFRAME_SECONDS } from '../config/instruments';
 import type {
   AIPriceActionSignal,
   DemoPosition,
@@ -34,9 +35,39 @@ interface CandlestickChartProps {
   candles: OHLCVCandle[];
   priceAction: PriceActionAnalysisSummary;
   activeSignal: AIPriceActionSignal | null;
+  signalHistory?: AIPriceActionSignal[];
+  causalArrows?: CausalSignalArrow[];
   openPosition?: DemoPosition | null;
   isLoading: boolean;
   onTimeframeChange: (tf: Timeframe) => void;
+}
+
+function mapConfirmedTimeToChartBar(
+  orderedCandles: OHLCVCandle[],
+  targetSec: number,
+  timeframe: Timeframe
+): number | null {
+  if (orderedCandles.length === 0 || !Number.isFinite(targetSec) || targetSec <= 0) {
+    return null;
+  }
+  const tfSec = TIMEFRAME_SECONDS[timeframe];
+  const bucketed = Math.floor(targetSec / tfSec) * tfSec;
+
+  const exact = orderedCandles.find((c) => c.time === bucketed);
+  if (exact) return exact.time;
+
+  // Find enclosing bar or nearest prior bar within chart window
+  const firstTime = orderedCandles[0].time;
+  const lastTime = orderedCandles[orderedCandles.length - 1].time;
+  if (targetSec < firstTime) return null;
+  if (targetSec >= lastTime) return lastTime;
+
+  for (let i = orderedCandles.length - 1; i >= 0; i--) {
+    if (orderedCandles[i].time <= targetSec) {
+      return orderedCandles[i].time;
+    }
+  }
+  return null;
 }
 
 export function CandlestickChart({
@@ -46,6 +77,8 @@ export function CandlestickChart({
   candles,
   priceAction,
   activeSignal,
+  signalHistory = [],
+  causalArrows = [],
   openPosition,
   isLoading,
   onTimeframeChange,
@@ -61,6 +94,7 @@ export function CandlestickChart({
   const [showSR, setShowSR] = useState(true);
   const [showZones, setShowZones] = useState(true);
   const [showMarkers, setShowMarkers] = useState(true);
+  const [showArrows, setShowArrows] = useState(true);
   const [showSignalLines, setShowSignalLines] = useState(true);
   const [hoveredBar, setHoveredBar] = useState<OHLCVCandle | null>(null);
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
@@ -258,30 +292,124 @@ export function CandlestickChart({
     }
   }, [symbol, timeframe, orderedCandles]);
 
-  // Plot Pure Price Action Markers (BOS, CHoCH, Sweep, Engulfing, Pin Bar)
+  // Plot Pure Price Action Markers (BOS, CHoCH, Sweep, ENG, PIN) + Confirmed Signal Arrows
   useEffect(() => {
     const plugin = markersPluginRef.current;
     if (!plugin) return;
 
-    if (!showMarkers || priceAction.markers.length === 0) {
-      plugin.setMarkers([]);
-      return;
+    const merged: SeriesMarker<Time>[] = [];
+    const seenKeys = new Set<string>();
+
+    const pushUnique = (marker: SeriesMarker<Time>) => {
+      const key = `${String(marker.time)}:${marker.text ?? ''}:${marker.shape}`;
+      if (seenKeys.has(key)) return;
+      seenKeys.add(key);
+      merged.push(marker);
+    };
+
+    if (showMarkers && priceAction.markers.length > 0) {
+      for (const m of priceAction.markers) {
+        if (!Number.isFinite(m.time)) continue;
+        pushUnique({
+          time: m.time as UTCTimestamp,
+          position: m.position,
+          color: m.color,
+          shape: m.shape,
+          text: m.text,
+        });
+      }
     }
 
-    const formatted: SeriesMarker<Time>[] = priceAction.markers
-      .filter((m) => Number.isFinite(m.time))
-      .slice()
-      .sort((a, b) => a.time - b.time)
-      .map((m) => ({
-        time: m.time as UTCTimestamp,
-        position: m.position,
-        color: m.color,
-        shape: m.shape,
-        text: m.text,
-      }));
+    if (showArrows) {
+      const liveSignals = [activeSignal, ...signalHistory].filter(
+        (s): s is AIPriceActionSignal => Boolean(s && s.symbol === symbol)
+      );
 
-    plugin.setMarkers(formatted);
-  }, [showMarkers, priceAction.markers]);
+      const blockedWaitBar =
+        activeSignal &&
+        activeSignal.symbol === symbol &&
+        activeSignal.plan.signal === 'WAIT' &&
+        activeSignal.confirmedBarTime > 0
+          ? mapConfirmedTimeToChartBar(
+              orderedCandles,
+              activeSignal.confirmedBarTime,
+              timeframe
+            )
+          : null;
+
+      // 1. Confirmed BUY / SELL signal arrows from locked closed-bar scans
+      const liveSignalBars = new Set<number>();
+      for (const sig of liveSignals) {
+        if (sig.plan.signal !== 'BUY' && sig.plan.signal !== 'SELL') continue;
+        const barTime = mapConfirmedTimeToChartBar(
+          orderedCandles,
+          sig.confirmedBarTime || Math.floor(Date.parse(sig.analyzedAt) / 1000),
+          timeframe
+        );
+        if (barTime === null) continue;
+        liveSignalBars.add(barTime);
+        const isBuy = sig.plan.signal === 'BUY';
+        pushUnique({
+          time: barTime as UTCTimestamp,
+          position: isBuy ? 'belowBar' : 'aboveBar',
+          color: isBuy ? '#22C55E' : '#EF4444',
+          shape: isBuy ? 'arrowUp' : 'arrowDown',
+          size: 2,
+          text: isBuy ? 'BUY ✓' : 'SELL ✓',
+        });
+      }
+
+      // 2. Active Demo position entry arrow if not already shown by liveSignals
+      if (openPosition && openPosition.symbol === symbol) {
+        const openSec = Math.floor(Date.parse(openPosition.openedAt) / 1000);
+        const openBar = mapConfirmedTimeToChartBar(
+          orderedCandles,
+          openSec,
+          timeframe
+        );
+        if (openBar !== null && !liveSignalBars.has(openBar)) {
+          const isBuy = openPosition.side === 'BUY';
+          pushUnique({
+            time: openBar as UTCTimestamp,
+            position: isBuy ? 'belowBar' : 'aboveBar',
+            color: isBuy ? '#22C55E' : '#EF4444',
+            shape: isBuy ? 'arrowUp' : 'arrowDown',
+            size: 2,
+            text: isBuy ? 'BUY' : 'SELL',
+          });
+        }
+      }
+
+      // 3. Causal closed-bar historical confirmation arrows across visible bars
+      for (const arrow of causalArrows) {
+        if (blockedWaitBar !== null && arrow.time === blockedWaitBar) continue;
+        if (liveSignalBars.has(arrow.time)) continue;
+        const isBuy = arrow.side === 'BUY';
+        pushUnique({
+          time: arrow.time as UTCTimestamp,
+          position: isBuy ? 'belowBar' : 'aboveBar',
+          color: isBuy ? '#10B981' : '#F43F5E',
+          shape: isBuy ? 'arrowUp' : 'arrowDown',
+          size: 2,
+          text: isBuy ? 'BUY' : 'SELL',
+        });
+      }
+    }
+
+    merged.sort((a, b) => Number(a.time) - Number(b.time));
+    plugin.setMarkers(merged);
+  }, [
+    showMarkers,
+    showArrows,
+    priceAction.markers,
+    activeSignal,
+    signalHistory,
+    causalArrows,
+    openPosition,
+    orderedCandles,
+    symbol,
+    timeframe,
+  ]);
 
   // Plot S/R Levels, Equilibrium, OB/FVG Zones, and AI Signal Entry/SL/TP Lines
   useEffect(() => {
@@ -540,6 +668,23 @@ export function CandlestickChart({
               <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
             )}
             <span>BOS</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowArrows((v) => !v)}
+            className={`inline-flex min-h-[34px] sm:min-h-0 items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              showArrows
+                ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300'
+                : 'border-slate-800 bg-[#0B0F17] text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            {showArrows ? (
+              <Eye className="h-3.5 w-3.5" aria-hidden="true" />
+            ) : (
+              <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
+            )}
+            <span>Arrows</span>
           </button>
 
           {((activeSignal && activeSignal.symbol === symbol) ||
