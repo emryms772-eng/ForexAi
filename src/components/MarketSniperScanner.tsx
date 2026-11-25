@@ -34,12 +34,14 @@ interface MarketSniperScannerProps {
   smsSending: boolean;
   ntfyTopic: string;
   ntfyAlertsEnabled: boolean;
+  ntfyNotifyWait: boolean;
   ntfyReady: boolean;
   ntfySending: boolean;
   ntfyFeedback: string | null;
   onUpdateNtfyTopic: (topic: string) => void;
   onGenerateNtfyTopic: () => void;
   onToggleNtfyAlerts: () => void;
+  onToggleNtfyNotifyWait: () => void;
   onTestNtfy: () => void;
   onSendNtfy: (signal: AIPriceActionSignal) => void;
   onScanMarket: () => void;
@@ -58,12 +60,14 @@ export function MarketSniperScanner({
   smsSending,
   ntfyTopic,
   ntfyAlertsEnabled,
+  ntfyNotifyWait,
   ntfyReady,
   ntfySending,
   ntfyFeedback,
   onUpdateNtfyTopic,
   onGenerateNtfyTopic,
   onToggleNtfyAlerts,
+  onToggleNtfyNotifyWait,
   onTestNtfy,
   onSendNtfy,
   onScanMarket,
@@ -165,6 +169,19 @@ export function MarketSniperScanner({
             }`}
           >
             {ntfyAlertsEnabled ? 'Auto-Push On' : 'Auto-Push Off'}
+          </button>
+
+          <button
+            type="button"
+            onClick={onToggleNtfyNotifyWait}
+            title="Switch between receiving every 5M scan + Closest Watch alert or BUY/SELL sniper entries only"
+            className={`min-h-[30px] rounded-md border px-2.5 py-1 text-[11px] font-medium transition-colors whitespace-nowrap cursor-pointer ${
+              ntfyNotifyWait
+                ? 'border-blue-500/40 bg-blue-500/15 text-blue-200'
+                : 'border-slate-700 bg-[#0B0F17] text-slate-300 hover:text-white'
+            }`}
+          >
+            {ntfyNotifyWait ? 'All Scans (incl. Watch)' : 'BUY / SELL Only'}
           </button>
 
           <div className="flex items-center gap-1.5">

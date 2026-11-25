@@ -35,11 +35,13 @@ import {
   requestMarketSniperScan,
   requestPriceActionBacktest,
   requestPriceActionSignal,
+  sendNtfyScanDigest,
   sendNtfySignalAlert,
   sendNtfyTestAlert,
   sendSmsSignalAlert,
   sendSmsTestAlert,
   subscribeMarketStream,
+  syncNtfySubscription,
 } from './services/marketClient';
 import type {
   AIBacktestReview,
@@ -177,6 +179,27 @@ export default function App() {
       active = false;
     };
   }, []);
+
+  // Keep server-side 5M background watcher synced with user's active ntfy topic & filter
+  useEffect(() => {
+    const cleanTopic = demoAccount.config.ntfyTopic.trim();
+    const valid = /^[A-Za-z0-9_-]{4,80}$/.test(cleanTopic);
+    if (!cleanTopic) return;
+    if (demoAccount.config.ntfyAlertsEnabled && !valid) return;
+
+    const timer = setTimeout(() => {
+      void syncNtfySubscription(
+        cleanTopic,
+        demoAccount.config.ntfyAlertsEnabled,
+        demoAccount.config.ntfyNotifyWait
+      );
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [
+    demoAccount.config.ntfyTopic,
+    demoAccount.config.ntfyAlertsEnabled,
+    demoAccount.config.ntfyNotifyWait,
+  ]);
 
   const instrument = useMemo(
     () => getInstrumentBySymbol(selectedSymbol),
@@ -622,30 +645,45 @@ export default function App() {
       const canAutoNtfy =
         /^[A-Za-z0-9_-]{4,80}$/.test(ntfyTopicClean) ||
         Boolean(ntfyStatusRef.current?.configured);
-      if (
-        isAutoTrigger &&
-        demoConfigRef.current.ntfyAlertsEnabled &&
-        canAutoNtfy &&
-        scan.sniperSignals.length > 0
-      ) {
-        for (const sniperSig of scan.sniperSignals) {
-          if (ntfyAlertedIdsRef.current.has(sniperSig.id)) continue;
-          ntfyAlertedIdsRef.current.add(sniperSig.id);
-          try {
-            const pushRes = await sendNtfySignalAlert(
-              sniperSig,
-              ntfyTopicClean || undefined
-            );
-            if (pushRes.sent) {
-              setNtfyFeedback(
-                `Auto-pushed ${sniperSig.symbol} ${sniperSig.plan.signal} to ntfy`
+      if (demoConfigRef.current.ntfyAlertsEnabled && canAutoNtfy) {
+        const topicKey = ntfyTopicClean || 'env-default';
+        if (scan.sniperSignals.length > 0) {
+          for (const sniperSig of scan.sniperSignals) {
+            const dedupeKey = `${topicKey}:${sniperSig.id}`;
+            if (ntfyAlertedIdsRef.current.has(dedupeKey)) continue;
+            ntfyAlertedIdsRef.current.add(dedupeKey);
+            try {
+              const pushRes = await sendNtfySignalAlert(
+                sniperSig,
+                ntfyTopicClean || undefined
               );
-              setLastExecutionNote(
-                `Sniper ntfy push sent: ${sniperSig.symbol} (${sniperSig.plan.signal} 5M).`
-              );
+              if (pushRes.sent) {
+                setNtfyFeedback(
+                  `Auto-pushed ${sniperSig.symbol} ${sniperSig.plan.signal} to ntfy`
+                );
+                setLastExecutionNote(
+                  `Sniper ntfy push sent: ${sniperSig.symbol} (${sniperSig.plan.signal} 5M).`
+                );
+              }
+            } catch {
+              ntfyAlertedIdsRef.current.delete(dedupeKey);
             }
-          } catch {
-            // Non-blocking ntfy delivery failure
+          }
+        } else if (demoConfigRef.current.ntfyNotifyWait) {
+          const digestKey = `${topicKey}:digest:${scan.confirmedBarTime}`;
+          if (!ntfyAlertedIdsRef.current.has(digestKey)) {
+            ntfyAlertedIdsRef.current.add(digestKey);
+            try {
+              const digestRes = await sendNtfyScanDigest(
+                scan,
+                ntfyTopicClean || undefined
+              );
+              if (digestRes.sent) {
+                setNtfyFeedback('Pushed 5M Market Scan & Closest Watch to ntfy');
+              }
+            } catch {
+              ntfyAlertedIdsRef.current.delete(digestKey);
+            }
           }
         }
       }
@@ -658,23 +696,92 @@ export default function App() {
     }
   }, []);
 
-  // Automatically scan all 14 markets on initial load and whenever a new 5M bar closes
+  // If user enables Auto-Push, All Scans, or sets a new topic after a scan already completed, push immediately
+  useEffect(() => {
+    if (!marketScan) return;
+    if (!demoAccount.config.ntfyAlertsEnabled) return;
+    const topicClean = demoAccount.config.ntfyTopic.trim();
+    const canPush =
+      /^[A-Za-z0-9_-]{4,80}$/.test(topicClean) ||
+      Boolean(ntfyStatus?.configured);
+    if (!canPush) return;
+
+    const topicKey = topicClean || 'env-default';
+    void (async () => {
+      if (marketScan.sniperSignals.length > 0) {
+        for (const sig of marketScan.sniperSignals) {
+          const dedupeKey = `${topicKey}:${sig.id}`;
+          if (ntfyAlertedIdsRef.current.has(dedupeKey)) continue;
+          ntfyAlertedIdsRef.current.add(dedupeKey);
+          try {
+            const pushRes = await sendNtfySignalAlert(
+              sig,
+              topicClean || undefined
+            );
+            if (pushRes.sent) {
+              setNtfyFeedback(`Auto-pushed ${sig.symbol} ${sig.plan.signal} to ntfy`);
+            }
+          } catch {
+            ntfyAlertedIdsRef.current.delete(dedupeKey);
+          }
+        }
+      } else if (demoAccount.config.ntfyNotifyWait) {
+        const digestKey = `${topicKey}:digest:${marketScan.confirmedBarTime}`;
+        if (!ntfyAlertedIdsRef.current.has(digestKey)) {
+          ntfyAlertedIdsRef.current.add(digestKey);
+          try {
+            const digestRes = await sendNtfyScanDigest(
+              marketScan,
+              topicClean || undefined
+            );
+            if (digestRes.sent) {
+              setNtfyFeedback('Pushed 5M Market Scan & Closest Watch to ntfy');
+            }
+          } catch {
+            ntfyAlertedIdsRef.current.delete(digestKey);
+          }
+        }
+      }
+    })();
+  }, [
+    marketScan,
+    demoAccount.config.ntfyTopic,
+    demoAccount.config.ntfyAlertsEnabled,
+    demoAccount.config.ntfyNotifyWait,
+    ntfyStatus,
+  ]);
+
+  // Automatically scan all 14 markets on initial load, whenever a new 5M bar closes, and on tab resume
   useEffect(() => {
     void runMarketSniperScan(false);
 
-    const closeWatcher = setInterval(() => {
+    const checkAndScanClosedBar = () => {
       if (isMarketScanningRef.current) return;
-      const { bucketStartSec } = getCandleProgress('5M');
+      const nowSec = Math.floor(Date.now() / 1000);
+      const { bucketStartSec } = getCandleProgress('5M', nowSec);
       const latestClosed5m = bucketStartSec - 300;
+      const elapsedInBar = nowSec - bucketStartSec;
       if (
+        elapsedInBar >= 6 &&
         lastMarketScanBarRef.current > 0 &&
         latestClosed5m > lastMarketScanBarRef.current
       ) {
         void runMarketSniperScan(true);
       }
-    }, 2500);
+    };
 
-    return () => clearInterval(closeWatcher);
+    const closeWatcher = setInterval(checkAndScanClosedBar, 2500);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        checkAndScanClosedBar();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+
+    return () => {
+      clearInterval(closeWatcher);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [runMarketSniperScan]);
 
   const handleSendSignalToSms = useCallback(
@@ -983,6 +1090,7 @@ export default function App() {
                   smsSending={smsSending}
                   ntfyTopic={demoAccount.config.ntfyTopic}
                   ntfyAlertsEnabled={demoAccount.config.ntfyAlertsEnabled}
+                  ntfyNotifyWait={demoAccount.config.ntfyNotifyWait}
                   ntfyReady={ntfyReady}
                   ntfySending={ntfySending}
                   ntfyFeedback={ntfyFeedback}
@@ -993,6 +1101,11 @@ export default function App() {
                   onToggleNtfyAlerts={() =>
                     handleUpdateConfig({
                       ntfyAlertsEnabled: !demoAccount.config.ntfyAlertsEnabled,
+                    })
+                  }
+                  onToggleNtfyNotifyWait={() =>
+                    handleUpdateConfig({
+                      ntfyNotifyWait: !demoAccount.config.ntfyNotifyWait,
                     })
                   }
                   onTestNtfy={handleTestNtfy}

@@ -23,7 +23,8 @@ export function createInitialDemoState(): DemoAccountState {
       riskPercentPerTrade: 1,
       ntfyAlertsEnabled: true,
       ntfyTopic: '',
-      ntfyNotifyWait: false,
+      ntfyNotifyWait: true,
+      ntfyAllScansInitialized: true,
       smsAlertsEnabled: false,
       smsNotifyWait: false,
     },
@@ -37,6 +38,14 @@ export function loadDemoAccountState(): DemoAccountState {
     if (!raw) return createInitialDemoState();
     const parsed = JSON.parse(raw) as Partial<DemoAccountState>;
     const base = createInitialDemoState();
+    const mergedConfig = {
+      ...base.config,
+      ...(parsed.config ?? {}),
+    };
+    if (!parsed.config?.ntfyAllScansInitialized) {
+      mergedConfig.ntfyNotifyWait = true;
+      mergedConfig.ntfyAllScansInitialized = true;
+    }
     return {
       initialBalance: parsed.initialBalance ?? base.initialBalance,
       balance:
@@ -49,10 +58,7 @@ export function loadDemoAccountState(): DemoAccountState {
       closedTrades: Array.isArray(parsed.closedTrades)
         ? parsed.closedTrades
         : [],
-      config: {
-        ...base.config,
-        ...(parsed.config ?? {}),
-      },
+      config: mergedConfig,
     };
   } catch {
     return createInitialDemoState();

@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { runNonRepaintingBacktest } from './src/analysis/backtester.ts';
-import { analyzePriceAction } from './src/analysis/priceAction.ts';
+import { analyzePriceAction, getCandleProgress } from './src/analysis/priceAction.ts';
 import { TIMEFRAMES, getInstrumentBySymbol } from './src/config/instruments.ts';
 import {
   generateBacktestReview,
@@ -17,7 +17,10 @@ import {
   getWatchlistQuotes,
 } from './src/server/marketData.ts';
 import {
+  getActiveNtfySubscriptions,
   getNtfyConfigStatus,
+  registerNtfySubscription,
+  sendNtfyMarketScanDigest,
   sendNtfySignalAlert,
   sendNtfyTestMessage,
 } from './src/server/ntfy.ts';
@@ -29,6 +32,7 @@ import {
 import type {
   AIBacktestReview,
   AIPriceActionSignal,
+  MarketScanResponse,
   OHLCVCandle,
   Timeframe,
 } from './src/types/market.ts';
@@ -391,17 +395,65 @@ async function startServer() {
     }
   });
 
+  app.post('/api/notifications/ntfy/subscribe', (req, res) => {
+    try {
+      const body = (req.body ?? {}) as {
+        topic?: unknown;
+        enabled?: unknown;
+        notifyWait?: unknown;
+      };
+      const result = registerNtfySubscription({
+        topic: body.topic,
+        enabled: body.enabled !== false,
+        notifyWait: body.notifyWait !== false,
+      });
+      res.json(result);
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unable to update ntfy subscription.';
+      res.status(400).json({ error: message });
+    }
+  });
+
   app.post('/api/notifications/ntfy', async (req, res) => {
     try {
       const body = (req.body ?? {}) as {
         action?: unknown;
         topic?: unknown;
         signal?: unknown;
+        scan?: unknown;
+        notifyWait?: unknown;
       };
 
       if (body.action === 'test') {
         const result = await sendNtfyTestMessage(body.topic);
         res.json({ sent: true, ...result });
+        return;
+      }
+
+      if (body.action === 'subscribe') {
+        const result = registerNtfySubscription({
+          topic: body.topic,
+          enabled: true,
+          notifyWait: body.notifyWait !== false,
+        });
+        res.json(result);
+        return;
+      }
+
+      if (body.action === 'digest') {
+        const scan = body.scan as Partial<MarketScanResponse> | undefined;
+        if (!scan || typeof scan !== 'object' || !Array.isArray(scan.watchSignals)) {
+          res.status(400).json({ error: 'Invalid scan payload for ntfy digest.' });
+          return;
+        }
+        const result = await sendNtfyMarketScanDigest(
+          scan as MarketScanResponse,
+          body.topic
+        );
+        res.json({ ok: true, ...result });
         return;
       }
 
@@ -489,6 +541,56 @@ async function startServer() {
 
   app.listen(port, '0.0.0.0', () => {
     console.log(`StrataDesk server listening on http://0.0.0.0:${port}`);
+
+    // Background 5M closed-bar sniper watcher so ntfy alerts fire reliably even when browser tabs sleep
+    let lastAutoPushBarBucket = 0;
+    let backgroundScanBusy = false;
+
+    const runServerAutoPushTick = async () => {
+      if (backgroundScanBusy) return;
+      const subs = getActiveNtfySubscriptions();
+      if (subs.length === 0) return;
+
+      const nowSec = Math.floor(Date.now() / 1000);
+      const { bucketStartSec } = getCandleProgress('5M', nowSec);
+      const elapsedInBar = nowSec - bucketStartSec;
+      // Wait 6s after each 5M close so broker feeds publish the finalized bar
+      if (elapsedInBar < 6 || bucketStartSec <= lastAutoPushBarBucket) {
+        return;
+      }
+
+      backgroundScanBusy = true;
+      lastAutoPushBarBucket = bucketStartSec;
+      try {
+        const scan = await scanMarketSniperSetups();
+        for (const sub of subs) {
+          if (scan.sniperSignals.length > 0) {
+            for (const sig of scan.sniperSignals) {
+              try {
+                await sendNtfySignalAlert(sig, sub.topic);
+              } catch {
+                // Non-blocking ntfy push error
+              }
+            }
+          } else if (sub.notifyWait) {
+            try {
+              await sendNtfyMarketScanDigest(scan, sub.topic);
+            } catch {
+              // Non-blocking ntfy digest error
+            }
+          }
+        }
+      } catch {
+        // Retry cleanly on next interval if transient feed error occurred
+        lastAutoPushBarBucket = 0;
+      } finally {
+        backgroundScanBusy = false;
+      }
+    };
+
+    setInterval(() => {
+      void runServerAutoPushTick();
+    }, 10_000);
   });
 }
 

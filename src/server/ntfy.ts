@@ -1,9 +1,68 @@
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { formatSmsSignalText } from '../analysis/mtfPrompt.ts';
-import type { AIPriceActionSignal, NtfyConfigStatus } from '../types/market.ts';
+import { getInstrumentBySymbol } from '../config/instruments.ts';
+import type {
+  AIPriceActionSignal,
+  MarketScanResponse,
+  NtfyConfigStatus,
+} from '../types/market.ts';
 
 const TOPIC_REGEX = /^[A-Za-z0-9_-]{4,80}$/;
 const REQUEST_TIMEOUT_MS = 6000;
 const DEDUPE_COOLDOWN_MS = 60_000;
+const SUBSCRIPTIONS_FILE = path.join(os.tmpdir(), 'stratadesk-ntfy-topics.json');
+const MAX_SUBSCRIPTION_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+
+interface StoredSubscription {
+  topic: string;
+  enabled: boolean;
+  notifyWait: boolean;
+  updatedAt: number;
+}
+
+const subscriptions = new Map<string, StoredSubscription>();
+let subscriptionsLoaded = false;
+
+function loadSubscriptionsOnce(): void {
+  if (subscriptionsLoaded) return;
+  subscriptionsLoaded = true;
+  try {
+    if (!fs.existsSync(SUBSCRIPTIONS_FILE)) return;
+    const raw = fs.readFileSync(SUBSCRIPTIONS_FILE, 'utf8');
+    const parsed = JSON.parse(raw) as StoredSubscription[];
+    if (!Array.isArray(parsed)) return;
+    const now = Date.now();
+    for (const item of parsed) {
+      if (
+        item &&
+        typeof item.topic === 'string' &&
+        TOPIC_REGEX.test(item.topic) &&
+        typeof item.updatedAt === 'number' &&
+        now - item.updatedAt < MAX_SUBSCRIPTION_AGE_MS
+      ) {
+        subscriptions.set(item.topic, {
+          topic: item.topic,
+          enabled: Boolean(item.enabled),
+          notifyWait: item.notifyWait !== false,
+          updatedAt: item.updatedAt,
+        });
+      }
+    }
+  } catch {
+    // Non-fatal if temp file unreadable
+  }
+}
+
+function saveSubscriptions(): void {
+  try {
+    const list = Array.from(subscriptions.values());
+    fs.writeFileSync(SUBSCRIPTIONS_FILE, JSON.stringify(list), 'utf8');
+  } catch {
+    // Non-fatal if temp file unwritable
+  }
+}
 
 const sentNtfySignalIds = new Set<string>();
 const recentNtfyFingerprints = new Map<string, number>();
@@ -45,6 +104,78 @@ export function validateNtfyTopic(topic: string): string {
     );
   }
   return cleaned;
+}
+
+export function registerNtfySubscription(params: {
+  topic: unknown;
+  enabled: boolean;
+  notifyWait?: boolean;
+}): {
+  ok: true;
+  topic: string | null;
+  enabled: boolean;
+  notifyWait: boolean;
+  activeCount: number;
+} {
+  loadSubscriptionsOnce();
+  const cleaned = cleanTopic(params.topic);
+  const notifyWait = params.notifyWait !== false;
+  if (!cleaned) {
+    return {
+      ok: true,
+      topic: null,
+      enabled: false,
+      notifyWait,
+      activeCount: getActiveNtfyTopics().length,
+    };
+  }
+
+  const valid = validateNtfyTopic(cleaned);
+  if (params.enabled) {
+    subscriptions.set(valid, {
+      topic: valid,
+      enabled: true,
+      notifyWait,
+      updatedAt: Date.now(),
+    });
+  } else {
+    subscriptions.delete(valid);
+  }
+  saveSubscriptions();
+
+  return {
+    ok: true,
+    topic: valid,
+    enabled: params.enabled,
+    notifyWait,
+    activeCount: getActiveNtfyTopics().length,
+  };
+}
+
+export function getActiveNtfySubscriptions(): Array<{
+  topic: string;
+  notifyWait: boolean;
+}> {
+  loadSubscriptionsOnce();
+  const map = new Map<string, boolean>();
+  const envTopic = cleanTopic(process.env.NTFY_TOPIC);
+  if (TOPIC_REGEX.test(envTopic)) {
+    map.set(envTopic, true);
+  }
+  const now = Date.now();
+  for (const [topic, entry] of subscriptions.entries()) {
+    if (entry.enabled && now - entry.updatedAt < MAX_SUBSCRIPTION_AGE_MS) {
+      map.set(topic, entry.notifyWait !== false);
+    }
+  }
+  return Array.from(map.entries()).map(([topic, notifyWait]) => ({
+    topic,
+    notifyWait,
+  }));
+}
+
+export function getActiveNtfyTopics(): string[] {
+  return getActiveNtfySubscriptions().map((s) => s.topic);
 }
 
 export function getNtfyConfigStatus(): NtfyConfigStatus {
@@ -172,6 +303,59 @@ export async function sendNtfySignalAlert(
   sentNtfySignalIds.add(dedupeId);
   recentNtfyFingerprints.set(fingerprint, now);
 
+  return { sent: true, topic: validTopic };
+}
+
+export async function sendNtfyMarketScanDigest(
+  scan: MarketScanResponse,
+  overrideTopic?: unknown
+): Promise<{ sent: boolean; deduplicated?: boolean; topic: string }> {
+  const rawTopic = resolveNtfyTopic(overrideTopic);
+  if (!rawTopic) {
+    throw new Error(
+      'No ntfy topic set. Enter or generate a topic name in StrataDesk first.'
+    );
+  }
+  const validTopic = validateNtfyTopic(rawTopic);
+
+  const now = Date.now();
+  pruneNtfyCache(now);
+
+  const barKey = scan.confirmedBarTime || Math.floor(now / 300_000) * 300;
+  const dedupeId = `${validTopic}:digest:${barKey}`;
+  if (sentNtfySignalIds.has(dedupeId)) {
+    return { sent: false, deduplicated: true, topic: validTopic };
+  }
+
+  const barUtc =
+    barKey > 0 ? new Date(barKey * 1000).toISOString().slice(11, 16) + ' UTC' : '5M Close';
+  const topWatches = (scan.watchSignals ?? []).slice(0, 3);
+
+  const watchLines = topWatches.map((w) => {
+    const d = getInstrumentBySymbol(w.symbol).decimals;
+    const entry = w.plan.entryPrice > 0 ? w.plan.entryPrice.toFixed(d) : w.spotPriceAtSignal.toFixed(d);
+    const sl = w.plan.stopLoss > 0 ? w.plan.stopLoss.toFixed(d) : '—';
+    const tp1 = w.plan.takeProfit1 > 0 ? w.plan.takeProfit1.toFixed(d) : '—';
+    return `• ${w.symbol} (${w.bias}) | Watch @ ${entry} | SL ${sl} | TP1 ${tp1}`;
+  });
+
+  const message = [
+    `Closed ${barUtc} bar scanned across ${scan.totalScanned} markets.`,
+    scan.sniperSignals.length === 0
+      ? '0 A+ Sniper Entries right now — Stay Flat.'
+      : `${scan.sniperSignals.length} A+ Sniper Entries active.`,
+    ...(watchLines.length > 0 ? ['', 'Closest Watch Zones:', ...watchLines] : []),
+  ].join('\n');
+
+  await publishNtfyNotification({
+    topic: validTopic,
+    title: `5M Scan (${barUtc}): Stay Flat · Closest Watch`,
+    message,
+    priority: 'default',
+    tags: ['mag', 'hourglass_flowing_sand'],
+  });
+
+  sentNtfySignalIds.add(dedupeId);
   return { sent: true, topic: validTopic };
 }
 

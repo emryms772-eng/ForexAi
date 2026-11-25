@@ -186,6 +186,7 @@ export interface AutoTradeConfig {
   ntfyAlertsEnabled: boolean;
   ntfyTopic: string;
   ntfyNotifyWait: boolean;
+  ntfyAllScansInitialized?: boolean;
   smsAlertsEnabled: boolean;
   smsNotifyWait: boolean;
 }

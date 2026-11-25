@@ -1,9 +1,13 @@
 import {
   getNtfyConfigStatus,
+  sendNtfyMarketScanDigest,
   sendNtfySignalAlert,
   sendNtfyTestMessage,
 } from '../../src/server/ntfy.ts';
-import type { AIPriceActionSignal } from '../../src/types/market.ts';
+import type {
+  AIPriceActionSignal,
+  MarketScanResponse,
+} from '../../src/types/market.ts';
 
 interface ServerlessRequest {
   method?: string;
@@ -41,6 +45,25 @@ export default async function handler(
     if (body.action === 'test') {
       const result = await sendNtfyTestMessage(body.topic);
       res.status(200).json({ sent: true, ...result });
+      return;
+    }
+
+    if (body.action === 'subscribe') {
+      res.status(200).json({ ok: true, subscribed: true });
+      return;
+    }
+
+    if (body.action === 'digest') {
+      const scan = (body as { scan?: unknown }).scan as Partial<MarketScanResponse> | undefined;
+      if (!scan || typeof scan !== 'object' || !Array.isArray(scan.watchSignals)) {
+        res.status(400).json({ error: 'Invalid scan payload for ntfy digest.' });
+        return;
+      }
+      const result = await sendNtfyMarketScanDigest(
+        scan as MarketScanResponse,
+        body.topic
+      );
+      res.status(200).json({ ok: true, ...result });
       return;
     }
 

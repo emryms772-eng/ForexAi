@@ -369,3 +369,40 @@ export async function sendNtfyTestAlert(topic?: string): Promise<{
     serverUrl?: string;
   }>(res, 'Failed to send test ntfy push');
 }
+
+export async function sendNtfyScanDigest(
+  scan: MarketScanResponse,
+  topic?: string
+): Promise<{ ok: boolean; sent?: boolean; deduplicated?: boolean; topic?: string }> {
+  const res = await fetch('/api/notifications/ntfy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      action: 'digest',
+      scan,
+      ...(topic?.trim() ? { topic: topic.trim() } : {}),
+    }),
+  });
+  return parseJsonSafe<{
+    ok: boolean;
+    sent?: boolean;
+    deduplicated?: boolean;
+    topic?: string;
+  }>(res, 'Failed to send ntfy scan digest');
+}
+
+export async function syncNtfySubscription(
+  topic: string,
+  enabled: boolean,
+  notifyWait = true
+): Promise<void> {
+  try {
+    await fetch('/api/notifications/ntfy/subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ topic: topic.trim(), enabled, notifyWait }),
+    });
+  } catch {
+    // Non-blocking subscription sync
+  }
+}
