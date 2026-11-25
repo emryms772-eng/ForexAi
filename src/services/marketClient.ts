@@ -11,6 +11,7 @@ import type {
   MarketCandlesResponse,
   MarketScanResponse,
   MarketTickEvent,
+  NtfyConfigStatus,
   OHLCVCandle,
   PriceActionAnalysisSummary,
   SmsConfigStatus,
@@ -317,4 +318,54 @@ export async function sendSmsTestAlert(): Promise<{
     res,
     'Failed to send test SMS message'
   );
+}
+
+export async function fetchNtfyStatus(): Promise<NtfyConfigStatus> {
+  const res = await fetch('/api/notifications/ntfy');
+  return parseJsonSafe<NtfyConfigStatus>(
+    res,
+    'Failed to check ntfy alert status'
+  );
+}
+
+export async function sendNtfySignalAlert(
+  signal: AIPriceActionSignal,
+  topic?: string
+): Promise<{ ok: boolean; sent?: boolean; deduplicated?: boolean; topic?: string }> {
+  const res = await fetch('/api/notifications/ntfy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      signal,
+      ...(topic?.trim() ? { topic: topic.trim() } : {}),
+    }),
+  });
+  return parseJsonSafe<{
+    ok: boolean;
+    sent?: boolean;
+    deduplicated?: boolean;
+    topic?: string;
+  }>(res, 'Failed to send ntfy alert');
+}
+
+export async function sendNtfyTestAlert(topic?: string): Promise<{
+  ok: boolean;
+  sent?: boolean;
+  topic?: string;
+  serverUrl?: string;
+}> {
+  const res = await fetch('/api/notifications/ntfy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      action: 'test',
+      ...(topic?.trim() ? { topic: topic.trim() } : {}),
+    }),
+  });
+  return parseJsonSafe<{
+    ok: boolean;
+    sent?: boolean;
+    topic?: string;
+    serverUrl?: string;
+  }>(res, 'Failed to send test ntfy push');
 }

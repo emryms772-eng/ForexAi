@@ -529,6 +529,7 @@ let cachedMarketScan: {
   createdAt: number;
   result: MarketScanResponse;
 } | null = null;
+let marketScanInflight: Promise<MarketScanResponse> | null = null;
 
 function scoreWatchProximity(sig: AIPriceActionSignal): number {
   const spot = Math.max(sig.spotPriceAtSignal, 1e-9);
@@ -555,99 +556,111 @@ export async function scanMarketSniperSetups(): Promise<MarketScanResponse> {
     return cachedMarketScan.result;
   }
 
-  const orderedTfs: Timeframe[] = ['4H', '1H', '15M', '5M', '1M'];
-  const allSignals: AIPriceActionSignal[] = [];
-  const batchSize = 5;
-
-  for (let i = 0; i < MARKET_INSTRUMENTS.length; i += batchSize) {
-    const batch = MARKET_INSTRUMENTS.slice(i, i + batchSize);
-    const batchResults = await Promise.all(
-      batch.map(async (instrument) => {
-        const timeframesData: TimeframePriceActionInput[] = await Promise.all(
-          orderedTfs.map(async (tf) => {
-            const targetLimit = tf === '5M' ? 240 : 200;
-            const data = await getMarketCandles(instrument.symbol, tf, targetLimit);
-            return {
-              timeframe: tf,
-              candles: data.candles,
-              analysis: analyzePriceAction(data.candles, instrument.decimals, {
-                timeframe: tf,
-              }),
-            };
-          })
-        );
-
-        const m5Entry =
-          timeframesData.find((t) => t.timeframe === '5M') ?? timeframesData[0];
-        const m5Closed = m5Entry.candles.filter((c) => c.time < bucketStartSec);
-        const barTime =
-          m5Closed[m5Closed.length - 1]?.time ?? expectedClosed5m;
-        const cacheKey = `${instrument.symbol}:${barTime}`;
-        const existing = signalCache.get(cacheKey);
-        if (
-          existing &&
-          Date.now() - existing.createdAt < SIGNAL_CACHE_TTL_MS
-        ) {
-          return existing.signal;
-        }
-
-        const sniperSig = generateLocalMtfSignal({
-          symbol: instrument.symbol,
-          activeTimeframe: '5M',
-          timeframesData,
-        });
-
-        if (sniperSig.plan.signal !== 'WAIT') {
-          if (signalCache.size > 60) {
-            const oldestKey = signalCache.keys().next().value;
-            if (oldestKey) signalCache.delete(oldestKey);
-          }
-          signalCache.set(cacheKey, {
-            createdAt: Date.now(),
-            confirmedBarTime: sniperSig.confirmedBarTime || barTime,
-            signal: sniperSig,
-          });
-        }
-
-        return sniperSig;
-      })
-    );
-    allSignals.push(...batchResults);
+  if (marketScanInflight) {
+    return marketScanInflight;
   }
 
-  const parseRr = (s: string): number => {
-    const m = String(s).match(/:\s*(\d+(?:\.\d+)?)/);
-    return m ? Number(m[1]) : 0;
-  };
+  marketScanInflight = (async () => {
+    try {
+      const orderedTfs: Timeframe[] = ['4H', '1H', '15M', '5M', '1M'];
+      const allSignals: AIPriceActionSignal[] = [];
+      const batchSize = 7;
 
-  const sniperSignals = allSignals
-    .filter((s) => s.plan.signal === 'BUY' || s.plan.signal === 'SELL')
-    .sort((a, b) => parseRr(b.plan.riskRewardRatio) - parseRr(a.plan.riskRewardRatio));
+      for (let i = 0; i < MARKET_INSTRUMENTS.length; i += batchSize) {
+        const batch = MARKET_INSTRUMENTS.slice(i, i + batchSize);
+        const batchResults = await Promise.all(
+          batch.map(async (instrument) => {
+            const timeframesData: TimeframePriceActionInput[] = await Promise.all(
+              orderedTfs.map(async (tf) => {
+                const targetLimit = tf === '5M' ? 240 : 200;
+                const data = await getMarketCandles(instrument.symbol, tf, targetLimit);
+                return {
+                  timeframe: tf,
+                  candles: data.candles,
+                  analysis: analyzePriceAction(data.candles, instrument.decimals, {
+                    timeframe: tf,
+                  }),
+                };
+              })
+            );
 
-  const watchSignals = allSignals
-    .filter((s) => s.plan.signal === 'WAIT')
-    .sort((a, b) => scoreWatchProximity(b) - scoreWatchProximity(a));
+            const m5Entry =
+              timeframesData.find((t) => t.timeframe === '5M') ?? timeframesData[0];
+            const m5Closed = m5Entry.candles.filter((c) => c.time < bucketStartSec);
+            const barTime =
+              m5Closed[m5Closed.length - 1]?.time ?? expectedClosed5m;
+            const cacheKey = `${instrument.symbol}:${barTime}`;
+            const existing = signalCache.get(cacheKey);
+            if (
+              existing &&
+              Date.now() - existing.createdAt < SIGNAL_CACHE_TTL_MS
+            ) {
+              return existing.signal;
+            }
 
-  const confirmedBarTime =
-    sniperSignals[0]?.confirmedBarTime ||
-    watchSignals[0]?.confirmedBarTime ||
-    expectedClosed5m;
+            const sniperSig = generateLocalMtfSignal({
+              symbol: instrument.symbol,
+              activeTimeframe: '5M',
+              timeframesData,
+            });
 
-  const result: MarketScanResponse = {
-    scannedAt: new Date().toISOString(),
-    confirmedBarTime,
-    totalScanned: allSignals.length,
-    sniperSignals,
-    watchSignals,
-  };
+            if (sniperSig.plan.signal !== 'WAIT') {
+              if (signalCache.size > 60) {
+                const oldestKey = signalCache.keys().next().value;
+                if (oldestKey) signalCache.delete(oldestKey);
+              }
+              signalCache.set(cacheKey, {
+                createdAt: Date.now(),
+                confirmedBarTime: sniperSig.confirmedBarTime || barTime,
+                signal: sniperSig,
+              });
+            }
 
-  cachedMarketScan = {
-    confirmedBarTime,
-    createdAt: Date.now(),
-    result,
-  };
+            return sniperSig;
+          })
+        );
+        allSignals.push(...batchResults);
+      }
 
-  return result;
+      const parseRr = (s: string): number => {
+        const m = String(s).match(/:\s*(\d+(?:\.\d+)?)/);
+        return m ? Number(m[1]) : 0;
+      };
+
+      const sniperSignals = allSignals
+        .filter((s) => s.plan.signal === 'BUY' || s.plan.signal === 'SELL')
+        .sort((a, b) => parseRr(b.plan.riskRewardRatio) - parseRr(a.plan.riskRewardRatio));
+
+      const watchSignals = allSignals
+        .filter((s) => s.plan.signal === 'WAIT')
+        .sort((a, b) => scoreWatchProximity(b) - scoreWatchProximity(a));
+
+      const confirmedBarTime =
+        sniperSignals[0]?.confirmedBarTime ||
+        watchSignals[0]?.confirmedBarTime ||
+        expectedClosed5m;
+
+      const result: MarketScanResponse = {
+        scannedAt: new Date().toISOString(),
+        confirmedBarTime,
+        totalScanned: allSignals.length,
+        sniperSignals,
+        watchSignals,
+      };
+
+      cachedMarketScan = {
+        confirmedBarTime,
+        createdAt: Date.now(),
+        result,
+      };
+
+      return result;
+    } finally {
+      marketScanInflight = null;
+    }
+  })();
+
+  return marketScanInflight;
 }
 
 async function runGeminiBacktestReview(

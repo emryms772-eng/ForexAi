@@ -1,11 +1,13 @@
 import {
   ArrowDownRight,
   ArrowUpRight,
+  Bell,
   MessageSquare,
   Play,
   RotateCcw,
   Send,
   ShieldCheck,
+  Sparkles,
   Square,
   X,
 } from 'lucide-react';
@@ -28,6 +30,11 @@ interface DemoTradingPanelProps {
   lastExecutionNote: string | null;
   smsStatus: SmsConfigStatus | null;
   smsSending: boolean;
+  ntfyReady: boolean;
+  ntfySending: boolean;
+  ntfyFeedback: string | null;
+  onGenerateNtfyTopic: () => void;
+  onTestNtfy: () => void;
   onTestSms: () => void;
   onUpdateConfig: (patch: Partial<AutoTradeConfig>) => void;
   onExecuteSignal: (signal: AIPriceActionSignal) => void;
@@ -54,6 +61,11 @@ export function DemoTradingPanel({
   lastExecutionNote,
   smsStatus,
   smsSending,
+  ntfyReady,
+  ntfySending,
+  ntfyFeedback,
+  onGenerateNtfyTopic,
+  onTestNtfy,
   onTestSms,
   onUpdateConfig,
   onExecuteSignal,
@@ -322,26 +334,45 @@ export function DemoTradingPanel({
         </div>
       </div>
 
-      {/* SMS Auto-Scan Signal Alerts Bar */}
+      {/* Free ntfy Phone Push Alerts Bar */}
       <div className="flex flex-col gap-2.5 border-b border-slate-800/80 bg-[#0B0F17]/60 px-5 py-3 text-xs lg:flex-row lg:items-center lg:justify-between">
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-2">
-            <MessageSquare className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
-            <span className="font-medium text-slate-200">SMS Auto-Scan:</span>
+            <Bell className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
+            <span className="font-medium text-slate-200">ntfy Free Push:</span>
             <button
               type="button"
               onClick={() =>
                 onUpdateConfig({
-                  smsAlertsEnabled: !demoAccount.config.smsAlertsEnabled,
+                  ntfyAlertsEnabled: !demoAccount.config.ntfyAlertsEnabled,
                 })
               }
               className={`rounded-md border px-2.5 py-1 text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer ${
-                demoAccount.config.smsAlertsEnabled
+                demoAccount.config.ntfyAlertsEnabled
                   ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300'
                   : 'border-slate-700 bg-[#0B0F17] text-slate-400 hover:text-slate-200'
               }`}
             >
-              {demoAccount.config.smsAlertsEnabled ? 'On' : 'Off'}
+              {demoAccount.config.ntfyAlertsEnabled ? 'On' : 'Off'}
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            <input
+              type="text"
+              value={demoAccount.config.ntfyTopic}
+              onChange={(e) => onUpdateConfig({ ntfyTopic: e.target.value })}
+              placeholder="stratadesk-yourname-7294"
+              aria-label="ntfy topic name"
+              className="w-52 rounded-md border border-slate-700 bg-[#0B0F17] px-2.5 py-1 font-mono text-[11px] text-slate-100 placeholder:text-slate-500 focus:border-blue-500 focus:outline-none"
+            />
+            <button
+              type="button"
+              onClick={onGenerateNtfyTopic}
+              className="inline-flex items-center gap-1 rounded-md border border-slate-700 bg-[#0B0F17] px-2.5 py-1 text-[11px] font-medium text-slate-200 hover:border-slate-500 hover:text-white whitespace-nowrap cursor-pointer"
+            >
+              <Sparkles className="h-3 w-3 text-blue-400" aria-hidden="true" />
+              <span>Generate</span>
             </button>
           </div>
 
@@ -349,63 +380,72 @@ export function DemoTradingPanel({
             <span className="text-slate-400">Notify:</span>
             <div
               role="group"
-              aria-label="SMS alert filter"
+              aria-label="ntfy alert filter"
               className="flex items-center gap-1 rounded-md border border-slate-800 bg-[#0B0F17] p-0.5"
             >
               <button
                 type="button"
-                onClick={() => onUpdateConfig({ smsNotifyWait: true })}
+                onClick={() => onUpdateConfig({ ntfyNotifyWait: false })}
                 className={`rounded px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap cursor-pointer ${
-                  demoAccount.config.smsNotifyWait
-                    ? 'bg-slate-800 text-slate-100'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                All Scans (incl. WAIT)
-              </button>
-              <button
-                type="button"
-                onClick={() => onUpdateConfig({ smsNotifyWait: false })}
-                className={`rounded px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap cursor-pointer ${
-                  !demoAccount.config.smsNotifyWait
+                  !demoAccount.config.ntfyNotifyWait
                     ? 'bg-slate-800 text-slate-100'
                     : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
                 BUY / SELL Only
               </button>
+              <button
+                type="button"
+                onClick={() => onUpdateConfig({ ntfyNotifyWait: true })}
+                className={`rounded px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                  demoAccount.config.ntfyNotifyWait
+                    ? 'bg-slate-800 text-slate-100'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                All Scans (incl. WAIT)
+              </button>
             </div>
           </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
-          {smsStatus?.configured ? (
-            <span className="text-[11px] text-emerald-300">
-              Connected via {smsStatus.provider} ({smsStatus.recipientMasked})
-            </span>
-          ) : (
-            <span className="text-[11px] text-slate-400">
-              Add <span className="font-mono text-slate-300">SMS_TO_PHONE</span> +{' '}
-              <span className="font-mono text-slate-300">TWILIO_*</span>,{' '}
-              <span className="font-mono text-slate-300">TEXTBELT_API_KEY</span>, or{' '}
-              <span className="font-mono text-slate-300">VONAGE_*</span> in Settings &gt; Secrets for live SMS.
-            </span>
-          )}
+          <span className="text-[11px] text-slate-400">
+            {ntfyFeedback
+              ? ntfyFeedback
+              : ntfyReady
+              ? '100% free via ntfy.sh'
+              : 'Enter or generate a topic and subscribe in the free ntfy app.'}
+          </span>
 
           <button
             type="button"
-            onClick={onTestSms}
-            disabled={smsSending || !smsStatus?.configured}
+            onClick={onTestNtfy}
+            disabled={ntfySending || !ntfyReady}
             title={
-              smsStatus?.configured
-                ? 'Send a test SMS alert to your configured number'
-                : 'Configure SMS server secrets first'
+              ntfyReady
+                ? 'Send a test ntfy notification to your phone'
+                : 'Enter or generate an ntfy topic first'
             }
-            className="inline-flex min-h-[32px] items-center gap-1.5 rounded-md border border-slate-700 bg-[#0B0F17] px-2.5 py-1 text-[11px] font-medium text-slate-200 transition-colors hover:border-emerald-500/50 hover:text-emerald-300 disabled:opacity-40 whitespace-nowrap cursor-pointer"
+            className="inline-flex min-h-[32px] items-center gap-1.5 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-200 transition-colors hover:bg-emerald-500/20 disabled:opacity-40 whitespace-nowrap cursor-pointer"
           >
-            <Send className="h-3 w-3" aria-hidden="true" />
-            <span>{smsSending ? 'Sending...' : 'Test SMS'}</span>
+            <Bell className="h-3 w-3" aria-hidden="true" />
+            <span>{ntfySending ? 'Sending...' : 'Test ntfy'}</span>
           </button>
+
+          {smsStatus?.configured && (
+            <button
+              type="button"
+              onClick={onTestSms}
+              disabled={smsSending}
+              title={`Send test SMS via ${smsStatus.provider} (${smsStatus.recipientMasked})`}
+              className="inline-flex min-h-[32px] items-center gap-1.5 rounded-md border border-slate-700 bg-[#0B0F17] px-2.5 py-1 text-[11px] font-medium text-slate-300 transition-colors hover:border-slate-500 hover:text-white disabled:opacity-40 whitespace-nowrap cursor-pointer"
+            >
+              <MessageSquare className="h-3 w-3" aria-hidden="true" />
+              <Send className="h-3 w-3" aria-hidden="true" />
+              <span>{smsSending ? 'Sending...' : 'Test SMS'}</span>
+            </button>
+          )}
         </div>
       </div>
 

@@ -2,6 +2,7 @@ import {
   AlertCircle,
   ArrowDownRight,
   ArrowUpRight,
+  Bell,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -39,10 +40,13 @@ interface AIAnalysisCardProps {
   error: string | null;
   smsConfigured?: boolean;
   smsSending?: boolean;
+  ntfyReady?: boolean;
+  ntfySending?: boolean;
   onGenerateSignal: () => void;
   onSelectTimeframe: (tf: Timeframe) => void;
   onExecuteOnDemo?: (signal: AIPriceActionSignal) => void;
   onSendSms?: (signal: AIPriceActionSignal) => void;
+  onSendNtfy?: (signal: AIPriceActionSignal) => void;
 }
 
 export function AIAnalysisCard({
@@ -56,10 +60,13 @@ export function AIAnalysisCard({
   error,
   smsConfigured = false,
   smsSending = false,
+  ntfyReady = false,
+  ntfySending = false,
   onGenerateSignal,
   onSelectTimeframe,
   onExecuteOnDemo,
   onSendSms,
+  onSendNtfy,
 }: AIAnalysisCardProps) {
   const [showBreakdown, setShowBreakdown] = useState(false);
   const [copiedAlert, setCopiedAlert] = useState(false);
@@ -377,17 +384,30 @@ export function AIAnalysisCard({
                 <span>{copiedAlert ? 'Copied SMS' : 'Copy SMS'}</span>
               </button>
 
-              {onSendSms && (
+              {onSendNtfy && (
+                <button
+                  type="button"
+                  onClick={() => onSendNtfy(signal)}
+                  disabled={ntfySending || !ntfyReady}
+                  title={
+                    ntfyReady
+                      ? 'Send instant free phone push via ntfy.sh'
+                      : 'Enter or generate an ntfy topic in the Market Sniper Scanner first'
+                  }
+                  className="inline-flex min-h-[40px] items-center justify-center gap-1.5 rounded-md border border-emerald-500/35 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-300 transition-colors hover:bg-emerald-500/20 disabled:opacity-45 whitespace-nowrap cursor-pointer"
+                >
+                  <Bell className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>{ntfySending ? 'Pushing...' : 'Push ntfy'}</span>
+                </button>
+              )}
+
+              {onSendSms && smsConfigured && (
                 <button
                   type="button"
                   onClick={() => onSendSms(signal)}
-                  disabled={smsSending || !smsConfigured}
-                  title={
-                    smsConfigured
-                      ? 'Send this signal via SMS'
-                      : 'Configure SMS_TO_PHONE & SMS provider credentials in Settings > Secrets'
-                  }
-                  className="inline-flex min-h-[40px] items-center justify-center gap-1.5 rounded-md border border-emerald-500/35 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-300 transition-colors hover:bg-emerald-500/20 disabled:opacity-45 whitespace-nowrap cursor-pointer"
+                  disabled={smsSending}
+                  title="Send this signal via SMS"
+                  className="inline-flex min-h-[40px] items-center justify-center gap-1.5 rounded-md border border-slate-700 bg-[#0B0F17] px-3 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-slate-500 hover:text-white disabled:opacity-45 whitespace-nowrap cursor-pointer"
                 >
                   <Send className="h-3.5 w-3.5" aria-hidden="true" />
                   <span>{smsSending ? 'Sending...' : 'Send SMS'}</span>

@@ -17,6 +17,11 @@ import {
   getWatchlistQuotes,
 } from './src/server/marketData.ts';
 import {
+  getNtfyConfigStatus,
+  sendNtfySignalAlert,
+  sendNtfyTestMessage,
+} from './src/server/ntfy.ts';
+import {
   getSmsConfigStatus,
   sendSmsSignalAlert,
   sendSmsTestMessage,
@@ -360,6 +365,78 @@ async function startServer() {
           ? error.message
           : 'Unable to send SMS notification.';
       const status = message.includes('not configured') ? 400 : 500;
+      res.status(status).json({ error: message });
+    }
+  });
+
+  app.get('/api/notifications/ntfy', (_req, res) => {
+    res.json(getNtfyConfigStatus());
+  });
+
+  app.post('/api/notifications/ntfy/test', async (req, res) => {
+    try {
+      const topic = (req.body as { topic?: unknown } | undefined)?.topic;
+      const result = await sendNtfyTestMessage(topic);
+      res.json({ sent: true, ...result });
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unable to send test ntfy notification.';
+      const status =
+        message.includes('Invalid ntfy') || message.includes('No ntfy')
+          ? 400
+          : 500;
+      res.status(status).json({ error: message });
+    }
+  });
+
+  app.post('/api/notifications/ntfy', async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as {
+        action?: unknown;
+        topic?: unknown;
+        signal?: unknown;
+      };
+
+      if (body.action === 'test') {
+        const result = await sendNtfyTestMessage(body.topic);
+        res.json({ sent: true, ...result });
+        return;
+      }
+
+      const sig = body.signal as Partial<AIPriceActionSignal> | undefined;
+      if (
+        !sig ||
+        typeof sig !== 'object' ||
+        typeof sig.id !== 'string' ||
+        !sig.id ||
+        typeof sig.symbol !== 'string' ||
+        !sig.symbol ||
+        typeof sig.spotPriceAtSignal !== 'number' ||
+        !Number.isFinite(sig.spotPriceAtSignal) ||
+        !sig.plan ||
+        typeof sig.plan !== 'object' ||
+        typeof sig.plan.signal !== 'string'
+      ) {
+        res.status(400).json({ error: 'Invalid signal payload for ntfy alert.' });
+        return;
+      }
+
+      const result = await sendNtfySignalAlert(
+        sig as AIPriceActionSignal,
+        body.topic
+      );
+      res.json({ ok: true, ...result });
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unable to send ntfy notification.';
+      const status =
+        message.includes('Invalid ntfy') || message.includes('No ntfy')
+          ? 400
+          : 500;
       res.status(status).json({ error: message });
     }
   });

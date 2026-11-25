@@ -29,11 +29,14 @@ import {
 } from './engine/demoBroker';
 import {
   fetchMarketCandles,
+  fetchNtfyStatus,
   fetchSmsStatus,
   fetchWatchlistQuotes,
   requestMarketSniperScan,
   requestPriceActionBacktest,
   requestPriceActionSignal,
+  sendNtfySignalAlert,
+  sendNtfyTestAlert,
   sendSmsSignalAlert,
   sendSmsTestAlert,
   subscribeMarketStream,
@@ -46,6 +49,7 @@ import type {
   DemoAccountState,
   FeedOrigin,
   MarketScanResponse,
+  NtfyConfigStatus,
   OHLCVCandle,
   SmsConfigStatus,
   Timeframe,
@@ -102,6 +106,10 @@ export default function App() {
   const [smsStatus, setSmsStatus] = useState<SmsConfigStatus | null>(null);
   const [smsSending, setSmsSending] = useState<boolean>(false);
 
+  const [ntfyStatus, setNtfyStatus] = useState<NtfyConfigStatus | null>(null);
+  const [ntfySending, setNtfySending] = useState<boolean>(false);
+  const [ntfyFeedback, setNtfyFeedback] = useState<string | null>(null);
+
   const [marketScan, setMarketScan] = useState<MarketScanResponse | null>(null);
   const [isMarketScanning, setIsMarketScanning] = useState<boolean>(false);
   const [marketScanError, setMarketScanError] = useState<string | null>(null);
@@ -118,12 +126,15 @@ export default function App() {
   isMarketScanningRef.current = isMarketScanning;
   const lastMarketScanBarRef = useRef<number>(0);
   const smsAlertedIdsRef = useRef<Set<string>>(new Set());
+  const ntfyAlertedIdsRef = useRef<Set<string>>(new Set());
   const selectedSymbolRef = useRef<string>(selectedSymbol);
   selectedSymbolRef.current = selectedSymbol;
   const demoConfigRef = useRef<AutoTradeConfig>(demoAccount.config);
   demoConfigRef.current = demoAccount.config;
   const smsStatusRef = useRef<SmsConfigStatus | null>(null);
   smsStatusRef.current = smsStatus;
+  const ntfyStatusRef = useRef<NtfyConfigStatus | null>(null);
+  ntfyStatusRef.current = ntfyStatus;
   const scanCursorRef = useRef<number>(0);
 
   // Persist demo account updates
@@ -131,7 +142,7 @@ export default function App() {
     saveDemoAccountState(demoAccount);
   }, [demoAccount]);
 
-  // Load server-side SMS notification status on mount
+  // Load server-side SMS and ntfy notification status on mount
   useEffect(() => {
     let active = true;
     fetchSmsStatus()
@@ -147,6 +158,21 @@ export default function App() {
           });
         }
       });
+
+    fetchNtfyStatus()
+      .then((status) => {
+        if (active) setNtfyStatus(status);
+      })
+      .catch(() => {
+        if (active) {
+          setNtfyStatus({
+            configured: false,
+            serverUrl: 'https://ntfy.sh',
+            topicMasked: null,
+          });
+        }
+      });
+
     return () => {
       active = false;
     };
@@ -434,8 +460,34 @@ export default function App() {
           return res.nextState;
         });
 
-        // Automatically send every Auto-Scan signal via SMS when enabled & configured
+        // Automatically send every Auto-Scan signal via SMS or ntfy when enabled & configured
         const cfg = demoConfigRef.current;
+        const ntfyTopicClean = cfg.ntfyTopic.trim();
+        const hasNtfy =
+          /^[A-Za-z0-9_-]{4,80}$/.test(ntfyTopicClean) ||
+          Boolean(ntfyStatusRef.current?.configured);
+
+        if (isAutoScan && cfg.ntfyAlertsEnabled && hasNtfy) {
+          const shouldPushNtfy =
+            cfg.ntfyNotifyWait || result.signal.plan.signal !== 'WAIT';
+          if (shouldPushNtfy && !ntfyAlertedIdsRef.current.has(result.signal.id)) {
+            ntfyAlertedIdsRef.current.add(result.signal.id);
+            try {
+              const pushRes = await sendNtfySignalAlert(
+                result.signal,
+                ntfyTopicClean || undefined
+              );
+              if (pushRes.sent) {
+                setNtfyFeedback(
+                  `Pushed ${result.signal.symbol} ${result.signal.plan.signal} to ntfy`
+                );
+              }
+            } catch {
+              // Non-blocking ntfy alert failure
+            }
+          }
+        }
+
         if (isAutoScan && cfg.smsAlertsEnabled) {
           const shouldSend =
             cfg.smsNotifyWait || result.signal.plan.signal !== 'WAIT';
@@ -565,6 +617,38 @@ export default function App() {
           }
         }
       }
+
+      const ntfyTopicClean = demoConfigRef.current.ntfyTopic.trim();
+      const canAutoNtfy =
+        /^[A-Za-z0-9_-]{4,80}$/.test(ntfyTopicClean) ||
+        Boolean(ntfyStatusRef.current?.configured);
+      if (
+        isAutoTrigger &&
+        demoConfigRef.current.ntfyAlertsEnabled &&
+        canAutoNtfy &&
+        scan.sniperSignals.length > 0
+      ) {
+        for (const sniperSig of scan.sniperSignals) {
+          if (ntfyAlertedIdsRef.current.has(sniperSig.id)) continue;
+          ntfyAlertedIdsRef.current.add(sniperSig.id);
+          try {
+            const pushRes = await sendNtfySignalAlert(
+              sniperSig,
+              ntfyTopicClean || undefined
+            );
+            if (pushRes.sent) {
+              setNtfyFeedback(
+                `Auto-pushed ${sniperSig.symbol} ${sniperSig.plan.signal} to ntfy`
+              );
+              setLastExecutionNote(
+                `Sniper ntfy push sent: ${sniperSig.symbol} (${sniperSig.plan.signal} 5M).`
+              );
+            }
+          } catch {
+            // Non-blocking ntfy delivery failure
+          }
+        }
+      }
     } catch (err) {
       setMarketScanError(
         err instanceof Error ? err.message : 'Unable to scan markets.'
@@ -631,6 +715,65 @@ export default function App() {
       setSmsSending(false);
     }
   }, [smsSending]);
+
+  const handleGenerateNtfyTopic = useCallback(() => {
+    const suffix = Math.random().toString(36).slice(2, 8);
+    const topic = `stratadesk-sniper-${suffix}`;
+    setDemoAccount((prev) => ({
+      ...prev,
+      config: {
+        ...prev.config,
+        ntfyTopic: topic,
+        ntfyAlertsEnabled: true,
+      },
+    }));
+    setNtfyFeedback(`Topic set: ${topic}`);
+  }, []);
+
+  const handleSendSignalToNtfy = useCallback(
+    async (sig: AIPriceActionSignal) => {
+      if (ntfySending) return;
+      setNtfySending(true);
+      setNtfyFeedback(null);
+      try {
+        const topic = demoConfigRef.current.ntfyTopic.trim() || undefined;
+        const res = await sendNtfySignalAlert(sig, topic);
+        const msg = res.deduplicated
+          ? `Already pushed ${sig.symbol} recently`
+          : `Pushed ${sig.symbol} ${sig.plan.signal} to ${res.topic ?? 'ntfy'}`;
+        setNtfyFeedback(msg);
+        setLastExecutionNote(msg);
+      } catch (err) {
+        const msg =
+          err instanceof Error ? err.message : 'Failed to push ntfy alert.';
+        setNtfyFeedback(msg);
+        setLastExecutionNote(msg);
+      } finally {
+        setNtfySending(false);
+      }
+    },
+    [ntfySending]
+  );
+
+  const handleTestNtfy = useCallback(async () => {
+    if (ntfySending) return;
+    setNtfySending(true);
+    setNtfyFeedback(null);
+    try {
+      const topic = demoConfigRef.current.ntfyTopic.trim() || undefined;
+      const res = await sendNtfyTestAlert(topic);
+      const msg = `Test push sent to ${res.topic ?? 'ntfy'}`;
+      setNtfyFeedback(msg);
+      setLastExecutionNote(`${msg}. Check the ntfy app on your phone.`);
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : 'Failed to send test ntfy push.';
+      setNtfyFeedback(msg);
+      setLastExecutionNote(msg);
+    } finally {
+      setNtfySending(false);
+    }
+  }, [ntfySending]);
 
   // Autonomous Auto-Scan Timer Loop
   useEffect(() => {
@@ -760,6 +903,13 @@ export default function App() {
 
   const displayPrice = livePrice || instrument.basePrice;
 
+  const ntfyReady = useMemo(
+    () =>
+      /^[A-Za-z0-9_-]{4,80}$/.test(demoAccount.config.ntfyTopic.trim()) ||
+      Boolean(ntfyStatus?.configured),
+    [demoAccount.config.ntfyTopic, ntfyStatus]
+  );
+
   const sniperBySymbol = useMemo(() => {
     const map: Record<string, 'BUY' | 'SELL'> = {};
     for (const sig of marketScan?.sniperSignals ?? []) {
@@ -831,6 +981,22 @@ export default function App() {
                   watchlist={watchlist}
                   smsConfigured={Boolean(smsStatus?.configured)}
                   smsSending={smsSending}
+                  ntfyTopic={demoAccount.config.ntfyTopic}
+                  ntfyAlertsEnabled={demoAccount.config.ntfyAlertsEnabled}
+                  ntfyReady={ntfyReady}
+                  ntfySending={ntfySending}
+                  ntfyFeedback={ntfyFeedback}
+                  onUpdateNtfyTopic={(topic) =>
+                    handleUpdateConfig({ ntfyTopic: topic })
+                  }
+                  onGenerateNtfyTopic={handleGenerateNtfyTopic}
+                  onToggleNtfyAlerts={() =>
+                    handleUpdateConfig({
+                      ntfyAlertsEnabled: !demoAccount.config.ntfyAlertsEnabled,
+                    })
+                  }
+                  onTestNtfy={handleTestNtfy}
+                  onSendNtfy={handleSendSignalToNtfy}
                   onScanMarket={() => void runMarketSniperScan(false)}
                   onSelectSignal={(sig) => {
                     setSelectedSymbol(sig.symbol);
@@ -878,10 +1044,13 @@ export default function App() {
                     error={aiError}
                     smsConfigured={Boolean(smsStatus?.configured)}
                     smsSending={smsSending}
+                    ntfyReady={ntfyReady}
+                    ntfySending={ntfySending}
                     onGenerateSignal={handleGenerateSignal}
                     onSelectTimeframe={setTimeframe}
                     onExecuteOnDemo={(sig) => handleExecuteSignalOnDemo(sig)}
                     onSendSms={handleSendSignalToSms}
+                    onSendNtfy={handleSendSignalToNtfy}
                   />
                 </div>
               </div>
@@ -897,6 +1066,11 @@ export default function App() {
                 lastExecutionNote={lastExecutionNote}
                 smsStatus={smsStatus}
                 smsSending={smsSending}
+                ntfyReady={ntfyReady}
+                ntfySending={ntfySending}
+                ntfyFeedback={ntfyFeedback}
+                onGenerateNtfyTopic={handleGenerateNtfyTopic}
+                onTestNtfy={handleTestNtfy}
                 onTestSms={handleTestSms}
                 onUpdateConfig={handleUpdateConfig}
                 onExecuteSignal={(sig) => handleExecuteSignalOnDemo(sig)}

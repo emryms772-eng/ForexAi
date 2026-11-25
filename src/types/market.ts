@@ -183,8 +183,17 @@ export interface AutoTradeConfig {
   autoScanIntervalSec: AutoScanIntervalSec;
   scanScope: AutoScanScope;
   riskPercentPerTrade: 0.5 | 1 | 2;
+  ntfyAlertsEnabled: boolean;
+  ntfyTopic: string;
+  ntfyNotifyWait: boolean;
   smsAlertsEnabled: boolean;
   smsNotifyWait: boolean;
+}
+
+export interface NtfyConfigStatus {
+  configured: boolean;
+  serverUrl: string;
+  topicMasked: string | null;
 }
 
 export interface SmsConfigStatus {

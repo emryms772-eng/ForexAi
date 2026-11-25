@@ -21,8 +21,11 @@ export function createInitialDemoState(): DemoAccountState {
       autoScanIntervalSec: 0,
       scanScope: 'active',
       riskPercentPerTrade: 1,
-      smsAlertsEnabled: true,
-      smsNotifyWait: true,
+      ntfyAlertsEnabled: true,
+      ntfyTopic: '',
+      ntfyNotifyWait: false,
+      smsAlertsEnabled: false,
+      smsNotifyWait: false,
     },
   };
 }

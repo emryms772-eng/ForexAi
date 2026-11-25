@@ -2,11 +2,13 @@ import {
   AlertCircle,
   ArrowDownRight,
   ArrowUpRight,
+  Bell,
   Crosshair,
   Lock,
   RefreshCw,
   Send,
   ShieldCheck,
+  Sparkles,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -30,6 +32,16 @@ interface MarketSniperScannerProps {
   watchlist: WatchlistQuote[];
   smsConfigured: boolean;
   smsSending: boolean;
+  ntfyTopic: string;
+  ntfyAlertsEnabled: boolean;
+  ntfyReady: boolean;
+  ntfySending: boolean;
+  ntfyFeedback: string | null;
+  onUpdateNtfyTopic: (topic: string) => void;
+  onGenerateNtfyTopic: () => void;
+  onToggleNtfyAlerts: () => void;
+  onTestNtfy: () => void;
+  onSendNtfy: (signal: AIPriceActionSignal) => void;
   onScanMarket: () => void;
   onSelectSignal: (signal: AIPriceActionSignal) => void;
   onExecuteOnDemo: (signal: AIPriceActionSignal, spotOverride?: number) => void;
@@ -44,6 +56,16 @@ export function MarketSniperScanner({
   watchlist,
   smsConfigured,
   smsSending,
+  ntfyTopic,
+  ntfyAlertsEnabled,
+  ntfyReady,
+  ntfySending,
+  ntfyFeedback,
+  onUpdateNtfyTopic,
+  onGenerateNtfyTopic,
+  onToggleNtfyAlerts,
+  onTestNtfy,
+  onSendNtfy,
   onScanMarket,
   onSelectSignal,
   onExecuteOnDemo,
@@ -121,6 +143,72 @@ export function MarketSniperScanner({
               aria-hidden="true"
             />
             <span>{isScanning ? 'Scanning Markets...' : 'Scan All Markets'}</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Zero-cost ntfy Phone Push Alert Setup Bar */}
+      <div className="flex flex-col gap-2.5 border-b border-slate-800/70 bg-[#0D121C] px-4 py-2.5 sm:px-5 lg:flex-row lg:items-center lg:justify-between text-xs">
+        <div className="flex flex-wrap items-center gap-2.5 min-w-0">
+          <div className="inline-flex items-center gap-1.5 text-slate-200 font-medium shrink-0">
+            <Bell className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
+            <span>ntfy Free Push Alerts</span>
+          </div>
+
+          <button
+            type="button"
+            onClick={onToggleNtfyAlerts}
+            className={`min-h-[30px] rounded-md border px-2.5 py-1 text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+              ntfyAlertsEnabled
+                ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300'
+                : 'border-slate-700 bg-[#0B0F17] text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            {ntfyAlertsEnabled ? 'Auto-Push On' : 'Auto-Push Off'}
+          </button>
+
+          <div className="flex items-center gap-1.5">
+            <input
+              type="text"
+              value={ntfyTopic}
+              onChange={(e) => onUpdateNtfyTopic(e.target.value)}
+              placeholder="Topic e.g. stratadesk-yourname-7294"
+              aria-label="ntfy topic name"
+              className="w-52 sm:w-60 min-h-[30px] rounded-md border border-slate-700 bg-[#0B0F17] px-2.5 py-1 font-mono text-[11px] text-slate-100 placeholder:text-slate-500 focus:border-blue-500 focus:outline-none"
+            />
+            <button
+              type="button"
+              onClick={onGenerateNtfyTopic}
+              title="Generate a private random ntfy topic name"
+              className="inline-flex min-h-[30px] items-center gap-1 rounded-md border border-slate-700 bg-[#0B0F17] px-2.5 py-1 text-[11px] font-medium text-slate-200 hover:border-slate-500 hover:text-white whitespace-nowrap cursor-pointer"
+            >
+              <Sparkles className="h-3 w-3 text-blue-400" aria-hidden="true" />
+              <span>Generate</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2.5">
+          <span className="text-[11px] text-slate-400">
+            {ntfyFeedback
+              ? ntfyFeedback
+              : ntfyReady
+              ? 'Subscribe to this exact topic in the free ntfy app.'
+              : 'Enter or generate a topic, then subscribe in the ntfy app.'}
+          </span>
+          <button
+            type="button"
+            onClick={onTestNtfy}
+            disabled={ntfySending || !ntfyReady}
+            title={
+              ntfyReady
+                ? 'Send a test push notification via ntfy.sh'
+                : 'Enter or generate a topic name (min 4 chars) first'
+            }
+            className="inline-flex min-h-[30px] items-center gap-1.5 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-200 transition-colors hover:bg-emerald-500/20 disabled:opacity-45 whitespace-nowrap cursor-pointer"
+          >
+            <Bell className="h-3 w-3" aria-hidden="true" />
+            <span>{ntfySending ? 'Sending...' : 'Test Push'}</span>
           </button>
         </div>
       </div>
@@ -278,6 +366,21 @@ export function MarketSniperScanner({
                       Take {sig.plan.signal} (Demo)
                     </button>
                   )}
+
+                  <button
+                    type="button"
+                    onClick={() => onSendNtfy(sig)}
+                    disabled={ntfySending || !ntfyReady}
+                    title={
+                      ntfyReady
+                        ? 'Push this sniper entry to your phone via ntfy'
+                        : 'Set an ntfy topic above first'
+                    }
+                    className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-emerald-500/35 bg-emerald-500/10 px-2.5 py-1.5 text-xs font-medium text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-45 whitespace-nowrap cursor-pointer"
+                  >
+                    <Bell className="h-3 w-3" aria-hidden="true" />
+                    <span>ntfy</span>
+                  </button>
 
                   {smsConfigured && (
                     <button
