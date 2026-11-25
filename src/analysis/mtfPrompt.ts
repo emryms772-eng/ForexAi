@@ -106,11 +106,21 @@ export function buildMtfSignalPrompt(params: {
     timeframesData.find((t) => t.timeframe === activeTimeframe) ??
     timeframesData[0];
 
+  const activeClosedCandles =
+    activeEntry.candles.length > 10
+      ? activeEntry.candles.slice(0, -1)
+      : activeEntry.candles;
   const currentPrice =
+    activeClosedCandles[activeClosedCandles.length - 1]?.close ??
     activeEntry.candles[activeEntry.candles.length - 1]?.close ??
     instrument.basePrice;
 
   const multiTimeframeContext = timeframesData.map((tfItem) => {
+    // Strictly exclude unclosed forming bar so AI signals never repaint mid-candle
+    const closedCandles =
+      tfItem.candles.length > 10
+        ? tfItem.candles.slice(0, -1)
+        : tfItem.candles;
     const timeline = extractHistoricalPriceActionTimeline(
       tfItem.candles,
       instrument.decimals
@@ -127,6 +137,7 @@ export function buildMtfSignalPrompt(params: {
           : tfItem.timeframe === '1M'
           ? 'MICRO_TIMING'
           : 'HTF_CONTEXT',
+      closedBarsOnly: true,
       history: {
         bars: timeline.barsAnalyzed,
         window: `${timeline.windowStartIso} -> ${timeline.windowEndIso}`,
@@ -140,6 +151,8 @@ export function buildMtfSignalPrompt(params: {
         events: timeline.historicalStructureAndSweeps.map(
           (e) => `${e.time} ${e.event} @ ${e.price}`
         ),
+        equalLiquidityPools: timeline.equalLiquidityPools,
+        displacementEvents: timeline.displacementEvents,
       },
       snapshot: {
         trend: snap.trendStructure,
@@ -164,7 +177,7 @@ export function buildMtfSignalPrompt(params: {
             `${new Date(p.time * 1000).toISOString().slice(5, 16).replace('T', ' ')} ${p.name} (${p.bias})`
         ),
       ohlcvLegend: 't|o|h|l|c|v',
-      recentBars: tfItem.candles
+      recentClosedBars: closedCandles
         .slice(-recentBarCount)
         .map(
           (c) =>
@@ -182,20 +195,21 @@ export function buildMtfSignalPrompt(params: {
     },
     activeChartTimeframe: activeTimeframe,
     executionTimeframe: '5M',
-    currentPrice,
+    nonRepaintingClosedBarsOnly: true,
+    lastClosedPrice: currentPrice,
     multiTimeframePriceAction: multiTimeframeContext,
   });
 
   const systemInstruction = [
-    'You are an institutional top-down multi-timeframe pure price-action analyst.',
-    'You are given BOTH the full past-to-present historical price-action progression (chronological swing pivots HH/HL/LH/LL, past BOS/CHoCH transitions, past liquidity sweeps, earlier-vs-recent session shifts, and unmitigated historical OBs/FVGs) AND recent OHLCV bars ("t|o|h|l|c|v") across ALL 5 timeframes (4H, 1H, 15M, 5M, 1M) with zero lagging indicators.',
-    'READ PAST TO PRESENT: Trace how market structure developed over the earlier history into current price on 4H, 1H, and 15M, then inspect 5M (and 1M micro-timing) to decide whether to execute NOW or WAIT.',
+    'You are an institutional top-down multi-timeframe pure price-action analyst operating strictly on CLOSED, NON-REPAINTING candles.',
+    'All data provided uses closed bars only (no unclosed forming candles). Never guess or extrapolate unclosed candle movement.',
+    'THOROUGH MARKET READ: Carefully synthesize ALL price-action evidence across ALL 5 timeframes (4H, 1H, 15M, 5M, 1M): chronological swing progression (HH/HL/LH/LL), BOS/CHoCH structural shifts, earlier-vs-recent session shifts, unswept Equal Highs/Lows (EQH/EQL liquidity magnets), liquidity sweeps, high-volume displacement bursts, unmitigated Order Blocks & Fair Value Gaps, S/R clusters, buyer/seller pressure, and candlestick rejection/engulfing triggers.',
     'EXECUTION RULE: Execution is ALWAYS strictly on the 5M timeframe. Set signalTimeframe to "5M". All entryPrice, entryZone, stopLoss, takeProfit1, and takeProfit2 levels MUST be calibrated for 5M execution.',
-    'MANDATORY QUALITY FILTERS: (1) Only issue BUY or SELL if aligned with the dominant 1H/4H historical structure and liquidity sweep; (2) Restrict BUY entries to Discount/Deep Discount zones (<= 42% of dealing range) and SELL entries to Premium zones (>= 58% of dealing range); (3) After a liquidity sweep, require confirmed 5M displacement (strong expansion body + volume/FVG follow-through) rather than entering on an unconfirmed initial reclaim.',
-    'WHEN TO WAIT: If 4H/1H/15M conflict, if 5M is in mid-range equilibrium, or if 5M has not yet swept liquidity/printed displacement or mitigated a 5M OB/FVG, you MUST output signal "WAIT". When outputting WAIT, clearly state why to wait, what exact 5M trigger/price level confirms entry, and still populate realistic conditional watch levels (entryPrice at the key 5M zone to watch, stopLoss behind structure, takeProfit1/takeProfit2 at liquidity targets).',
+    'MANDATORY QUALITY FILTERS: (1) Only issue BUY or SELL if aligned with the dominant 1H/4H historical structure and liquidity sweep; (2) Restrict BUY entries to Discount/Deep Discount zones (<= 42% of dealing range) and SELL entries to Premium zones (>= 58% of dealing range); (3) After a liquidity sweep, require confirmed closed-bar 5M displacement (strong expansion body + volume/FVG follow-through) rather than entering on an unconfirmed initial reclaim.',
+    'WHEN TO WAIT: If 4H/1H/15M conflict, if 5M is in mid-range equilibrium, or if 5M has not yet swept liquidity/printed closed-bar displacement or mitigated a 5M OB/FVG, you MUST output signal "WAIT". When outputting WAIT, clearly state why to wait, what exact 5M closed-bar trigger/price level confirms entry, and still populate realistic conditional watch levels (entryPrice at the key 5M zone to watch, stopLoss behind structure, takeProfit1/takeProfit2 at EQH/EQL or swing liquidity targets).',
     'CRITICAL RULE: Do NOT use, mention, or rely on lagging indicators such as RSI, MACD, EMA, SMA, Stochastics, or Bollinger Bands.',
     'Provide a concise timeframeAlignment array covering all 5 timeframes (4H, 1H, 15M, 5M, 1M).',
-    `All price levels must be realistic relative to currentPrice (${currentPrice}) and rounded to ${instrument.decimals} decimal places.`,
+    `All price levels must be realistic relative to lastClosedPrice (${currentPrice}) and rounded to ${instrument.decimals} decimal places.`,
     'For a BUY (or bullish WAIT watch plan): stopLoss < entryPrice < takeProfit1 < takeProfit2.',
     'For a SELL (or bearish WAIT watch plan): takeProfit2 < takeProfit1 < entryPrice < stopLoss.',
     'Never promise guaranteed profits.',
@@ -354,4 +368,31 @@ export function normalizeBacktestReviewResult(params: {
       ? parsed.recommendations.slice(0, 4)
       : [],
   };
+}
+
+export function formatWhatsAppSignalText(signal: AIPriceActionSignal): string {
+  const instrument = getInstrumentBySymbol(signal.symbol);
+  const d = instrument.decimals;
+  const fmt = (val: number) => (val > 0 ? val.toFixed(d) : 'Watch');
+  const { plan } = signal;
+  const timestamp = new Date(signal.analyzedAt || Date.now()).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+
+  const lines = [
+    `*StrataDesk 5M Signal* · ${signal.symbol}`,
+    `Action: *${plan.signal}* (${plan.signalStrength}) | Bias: ${signal.bias}`,
+    `Setup: ${plan.setupType}`,
+    `Trigger: ${plan.triggerPattern}`,
+    `Entry (5M): ${fmt(plan.entryPrice)} (${plan.entryZone})`,
+    `Stop Loss: ${fmt(plan.stopLoss)}`,
+    `TP1: ${fmt(plan.takeProfit1)} | TP2: ${fmt(plan.takeProfit2)}`,
+    `R:R: ${plan.riskRewardRatio} | Closed Spot: ${signal.spotPriceAtSignal.toFixed(d)}`,
+    `Invalidation: ${plan.invalidationReason}`,
+    `Read: ${signal.priceActionNarrative}`,
+    `Verified: 4H-1M Closed-Bar Non-Repainting (${timestamp})`,
+  ];
+
+  return lines.join('\n');
 }

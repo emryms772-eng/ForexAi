@@ -15,8 +15,14 @@ import {
   getMarketCandles,
   getWatchlistQuotes,
 } from './src/server/marketData.ts';
+import {
+  getWhatsAppConfigStatus,
+  sendWhatsAppSignalAlert,
+  sendWhatsAppTestMessage,
+} from './src/server/whatsapp.ts';
 import type {
   AIBacktestReview,
+  AIPriceActionSignal,
   OHLCVCandle,
   Timeframe,
 } from './src/types/market.ts';
@@ -260,6 +266,71 @@ async function startServer() {
           ? error.message
           : 'Unable to execute causal price-action backtest.';
       res.status(500).json({ error: message });
+    }
+  });
+
+  app.get('/api/notifications/whatsapp', (_req, res) => {
+    res.json(getWhatsAppConfigStatus());
+  });
+
+  app.get('/api/notifications/whatsapp/status', (_req, res) => {
+    res.json(getWhatsAppConfigStatus());
+  });
+
+  app.post('/api/notifications/whatsapp/test', async (_req, res) => {
+    try {
+      const result = await sendWhatsAppTestMessage();
+      res.json({ ok: true, sent: true, provider: result.provider });
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unable to send test WhatsApp alert.';
+      const status = message.includes('not configured') ? 400 : 500;
+      res.status(status).json({ error: message });
+    }
+  });
+
+  app.post('/api/notifications/whatsapp', async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as {
+        action?: unknown;
+        signal?: unknown;
+      };
+
+      if (body.action === 'test') {
+        const result = await sendWhatsAppTestMessage();
+        res.json({ ok: true, sent: true, provider: result.provider });
+        return;
+      }
+
+      const sig = body.signal as Partial<AIPriceActionSignal> | undefined;
+      if (
+        !sig ||
+        typeof sig !== 'object' ||
+        typeof sig.id !== 'string' ||
+        !sig.id ||
+        typeof sig.symbol !== 'string' ||
+        !sig.symbol ||
+        typeof sig.spotPriceAtSignal !== 'number' ||
+        !Number.isFinite(sig.spotPriceAtSignal) ||
+        !sig.plan ||
+        typeof sig.plan !== 'object' ||
+        typeof sig.plan.signal !== 'string'
+      ) {
+        res.status(400).json({ error: 'Invalid signal payload for WhatsApp alert.' });
+        return;
+      }
+
+      const result = await sendWhatsAppSignalAlert(sig as AIPriceActionSignal);
+      res.json({ ok: true, ...result });
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unable to send WhatsApp notification.';
+      const status = message.includes('not configured') ? 400 : 500;
+      res.status(status).json({ error: message });
     }
   });
 

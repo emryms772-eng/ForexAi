@@ -486,11 +486,11 @@ export function analyzePriceAction(
     };
   }
 
-  const lastSpotClose = candles[candles.length - 1].close;
+  const lastClosedClose = evalCandles[evalCandles.length - 1].close;
   const avgRangeRaw = computeAverageCandleRange(evalCandles, 20);
   const avgCandleRange = roundToDecimals(avgRangeRaw, decimals);
   const avgRangePct =
-    Math.round((avgRangeRaw / Math.max(lastSpotClose, 1e-9)) * 10000) / 100;
+    Math.round((avgRangeRaw / Math.max(lastClosedClose, 1e-9)) * 10000) / 100;
 
   const pivots = detectSwingPivots(evalCandles, PIVOT_LOOKBACK);
   const swingHighs = pivots.filter((p) => p.kind === 'high');
@@ -513,7 +513,7 @@ export function analyzePriceAction(
   );
 
   const rangeSpan = Math.max(dealingRangeHigh - dealingRangeLow, 1e-9);
-  const rawPosPct = ((lastSpotClose - dealingRangeLow) / rangeSpan) * 100;
+  const rawPosPct = ((lastClosedClose - dealingRangeLow) / rangeSpan) * 100;
   const rangePositionPct =
     Math.round(Math.min(100, Math.max(0, rawPosPct)) * 10) / 10;
 
@@ -593,14 +593,14 @@ export function analyzePriceAction(
   const levels = clusterSupportResistance(
     evalCandles,
     pivots,
-    lastSpotClose,
+    lastClosedClose,
     avgRangeRaw,
     decimals
   );
   const zones = detectFairValueGapsAndOrderBlocks(
     evalCandles,
     avgRangeRaw,
-    lastSpotClose,
+    lastClosedClose,
     decimals
   );
   const patternResult = detectCandlestickPatternsAndSweeps(
@@ -656,6 +656,8 @@ export interface HistoricalPriceActionTimeline {
     price: number;
     bias: 'Bullish' | 'Bearish';
   }>;
+  equalLiquidityPools: string[];
+  displacementEvents: string[];
   earlierSessionVsRecentShift: string;
 }
 
@@ -664,8 +666,8 @@ function formatUtcShort(unixSec: number): string {
 }
 
 /**
- * Extracts chronological past-to-present price action across the entire candle history
- * (not just the most recent bars) so MTF analysis understands how structure evolved into present price.
+ * Extracts chronological past-to-present price action across closed bars only
+ * (never repainting on the forming live bar) so MTF analysis understands how structure evolved.
  */
 export function extractHistoricalPriceActionTimeline(
   candles: OHLCVCandle[],
@@ -683,12 +685,14 @@ export function extractHistoricalPriceActionTimeline(
       macroZone: 'Equilibrium',
       swingSequence: [],
       historicalStructureAndSweeps: [],
+      equalLiquidityPools: [],
+      displacementEvents: [],
       earlierSessionVsRecentShift: 'Insufficient historical bars.',
     };
   }
 
   const pivots = detectSwingPivots(evalCandles, PIVOT_LOOKBACK);
-  const lastClose = candles[candles.length - 1].close;
+  const lastClose = evalCandles[evalCandles.length - 1].close;
   const historicalHigh = roundToDecimals(
     Math.max(...evalCandles.map((c) => c.high)),
     decimals
@@ -834,6 +838,55 @@ export function extractHistoricalPriceActionTimeline(
     decimals
   );
 
+  const avgRange = Math.max(computeAverageCandleRange(evalCandles, 20), 1e-9);
+  const eqTol = avgRange * 0.35;
+  const equalLiquidityPools: string[] = [];
+
+  for (let i = 0; i < swingHighs.length; i++) {
+    for (let j = i + 1; j < swingHighs.length; j++) {
+      if (Math.abs(swingHighs[i].price - swingHighs[j].price) <= eqTol) {
+        const level = roundToDecimals((swingHighs[i].price + swingHighs[j].price) / 2, decimals);
+        const swept = evalCandles.slice(swingHighs[j].index + 1).some((b) => b.high > level);
+        if (!swept) {
+          equalLiquidityPools.push(`EQH @ ${level} (Unswept Buy-Side Liquidity)`);
+        }
+        break;
+      }
+    }
+  }
+
+  for (let i = 0; i < swingLows.length; i++) {
+    for (let j = i + 1; j < swingLows.length; j++) {
+      if (Math.abs(swingLows[i].price - swingLows[j].price) <= eqTol) {
+        const level = roundToDecimals((swingLows[i].price + swingLows[j].price) / 2, decimals);
+        const swept = evalCandles.slice(swingLows[j].index + 1).some((b) => b.low < level);
+        if (!swept) {
+          equalLiquidityPools.push(`EQL @ ${level} (Unswept Sell-Side Liquidity)`);
+        }
+        break;
+      }
+    }
+  }
+
+  const recentAvgVol =
+    evalCandles.slice(-24).reduce((acc, c) => acc + c.volume, 0) /
+    Math.max(Math.min(evalCandles.length, 24), 1);
+  const displacementEvents: string[] = [];
+  const dispStart = Math.max(0, evalCandles.length - 24);
+  for (let i = dispStart; i < evalCandles.length; i++) {
+    const bar = evalCandles[i];
+    const body = Math.abs(bar.close - bar.open);
+    const range = Math.max(bar.high - bar.low, 1e-9);
+    const isStrongBody = body >= avgRange * 1.35 && body / range >= 0.58;
+    if (isStrongBody) {
+      const dir = bar.close >= bar.open ? 'Bullish' : 'Bearish';
+      const volRatio = recentAvgVol > 0 ? (bar.volume / recentAvgVol).toFixed(1) : '1.0';
+      displacementEvents.push(
+        `${formatUtcShort(bar.time)} ${dir} Displacement (${roundToDecimals(bar.open, decimals)}->${roundToDecimals(bar.close, decimals)}, ${volRatio}x vol)`
+      );
+    }
+  }
+
   const earlierSessionVsRecentShift = `Earlier half (${earlyPct >= 0 ? '+' : ''}${earlyPct.toFixed(2)}%, range ${earlyLow}-${earlyHigh}) -> Recent half (${recentPct >= 0 ? '+' : ''}${recentPct.toFixed(2)}%, range ${recentLow}-${recentHigh})`;
 
   return {
@@ -846,6 +899,8 @@ export function extractHistoricalPriceActionTimeline(
     macroZone,
     swingSequence: labeledSwings.slice(-10),
     historicalStructureAndSweeps: events.slice(-12),
+    equalLiquidityPools: equalLiquidityPools.slice(-6),
+    displacementEvents: displacementEvents.slice(-5),
     earlierSessionVsRecentShift,
   };
 }

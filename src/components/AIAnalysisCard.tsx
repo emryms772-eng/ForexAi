@@ -2,14 +2,18 @@ import {
   AlertCircle,
   ArrowDownRight,
   ArrowUpRight,
+  Check,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
   Clock,
+  Copy,
   RefreshCw,
+  Send,
   Zap,
 } from 'lucide-react';
 import { useState } from 'react';
+import { formatWhatsAppSignalText } from '../analysis/mtfPrompt';
 import type { AIPriceActionSignal, Timeframe } from '../types/market';
 
 interface AIAnalysisCardProps {
@@ -19,9 +23,12 @@ interface AIAnalysisCardProps {
   signal: AIPriceActionSignal | null;
   isAnalyzing: boolean;
   error: string | null;
+  whatsappConfigured?: boolean;
+  whatsappSending?: boolean;
   onGenerateSignal: () => void;
   onSelectTimeframe: (tf: Timeframe) => void;
   onExecuteOnDemo?: (signal: AIPriceActionSignal) => void;
+  onSendWhatsApp?: (signal: AIPriceActionSignal) => void;
 }
 
 export function AIAnalysisCard({
@@ -31,11 +38,27 @@ export function AIAnalysisCard({
   signal,
   isAnalyzing,
   error,
+  whatsappConfigured = false,
+  whatsappSending = false,
   onGenerateSignal,
   onSelectTimeframe,
   onExecuteOnDemo,
+  onSendWhatsApp,
 }: AIAnalysisCardProps) {
   const [showBreakdown, setShowBreakdown] = useState(false);
+  const [copiedAlert, setCopiedAlert] = useState(false);
+
+  const handleCopyWhatsAppAlert = async () => {
+    if (!signal) return;
+    const text = formatWhatsAppSignalText(signal);
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedAlert(true);
+      setTimeout(() => setCopiedAlert(false), 2000);
+    } catch {
+      // Clipboard API unavailable in restricted frames
+    }
+  };
 
   const isDifferentSymbol = signal !== null && signal.symbol !== symbol;
   const recommendedTf = signal?.signalTimeframe ?? '5M';
@@ -71,7 +94,7 @@ export function AIAnalysisCard({
             5M AI Signal
           </h2>
           <p className="mt-0.5 text-xs text-slate-400">
-            {symbol} <span aria-hidden="true">·</span> 4H–1M MTF Read
+            {symbol} <span aria-hidden="true">·</span> 4H–1M Closed-Bar Non-Repainting
           </p>
         </div>
 
@@ -223,15 +246,47 @@ export function AIAnalysisCard({
               </div>
             )}
 
-            {onExecuteOnDemo && signal.plan.signal !== 'WAIT' && (
+            <div className="flex flex-wrap items-center gap-2">
+              {onExecuteOnDemo && signal.plan.signal !== 'WAIT' && (
+                <button
+                  type="button"
+                  onClick={() => onExecuteOnDemo(signal)}
+                  className="flex-1 min-h-[40px] rounded-md border border-blue-500/40 bg-blue-600/15 px-3 py-2 text-xs font-semibold text-blue-200 transition-colors hover:bg-blue-600/25 whitespace-nowrap cursor-pointer"
+                >
+                  Execute {signal.plan.signal} (Demo)
+                </button>
+              )}
+
               <button
                 type="button"
-                onClick={() => onExecuteOnDemo(signal)}
-                className="w-full min-h-[40px] rounded-md border border-blue-500/40 bg-blue-600/15 py-2 text-xs font-semibold text-blue-200 transition-colors hover:bg-blue-600/25 cursor-pointer"
+                onClick={handleCopyWhatsAppAlert}
+                className="inline-flex min-h-[40px] items-center justify-center gap-1.5 rounded-md border border-slate-700 bg-[#0B0F17] px-3 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-slate-500 hover:text-white whitespace-nowrap cursor-pointer"
               >
-                Place {signal.plan.signal} Order on Demo Account
+                {copiedAlert ? (
+                  <Check className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
+                ) : (
+                  <Copy className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+                )}
+                <span>{copiedAlert ? 'Copied Alert' : 'Copy WhatsApp'}</span>
               </button>
-            )}
+
+              {onSendWhatsApp && (
+                <button
+                  type="button"
+                  onClick={() => onSendWhatsApp(signal)}
+                  disabled={whatsappSending || !whatsappConfigured}
+                  title={
+                    whatsappConfigured
+                      ? 'Send this signal to your WhatsApp'
+                      : 'Configure WHATSAPP_TO_PHONE & provider credentials in Settings > Secrets'
+                  }
+                  className="inline-flex min-h-[40px] items-center justify-center gap-1.5 rounded-md border border-emerald-500/35 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-300 transition-colors hover:bg-emerald-500/20 disabled:opacity-45 whitespace-nowrap cursor-pointer"
+                >
+                  <Send className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>{whatsappSending ? 'Sending...' : 'WhatsApp'}</span>
+                </button>
+              )}
+            </div>
 
             {/* Signal Execution Levels */}
             <div className="grid grid-cols-2 gap-2.5">

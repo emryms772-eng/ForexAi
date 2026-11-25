@@ -164,6 +164,14 @@ export interface AutoTradeConfig {
   autoScanIntervalSec: AutoScanIntervalSec;
   scanScope: AutoScanScope;
   riskPercentPerTrade: 0.5 | 1 | 2;
+  whatsappAlertsEnabled: boolean;
+  whatsappNotifyWait: boolean;
+}
+
+export interface WhatsAppConfigStatus {
+  configured: boolean;
+  provider: 'callmebot' | 'meta-cloud' | 'twilio' | 'none';
+  recipientMasked: string | null;
 }
 
 export interface DemoPosition {

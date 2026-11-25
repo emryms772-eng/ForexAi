@@ -10,6 +10,7 @@ import type {
   PriceActionAnalysisSummary,
   Timeframe,
   WatchlistQuote,
+  WhatsAppConfigStatus,
 } from '../types/market';
 import {
   generateBacktestReviewViaPuter,
@@ -274,4 +275,44 @@ export async function requestPriceActionBacktest(params: {
   }
 
   return data;
+}
+
+export async function fetchWhatsAppStatus(): Promise<WhatsAppConfigStatus> {
+  const res = await fetch('/api/notifications/whatsapp');
+  return parseJsonSafe<WhatsAppConfigStatus>(
+    res,
+    'Failed to check WhatsApp alert status'
+  );
+}
+
+export async function sendWhatsAppSignalAlert(
+  signal: AIPriceActionSignal
+): Promise<{ ok: boolean; sent?: boolean; deduplicated?: boolean; provider?: string }> {
+  const res = await fetch('/api/notifications/whatsapp', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ signal }),
+  });
+  return parseJsonSafe<{
+    ok: boolean;
+    sent?: boolean;
+    deduplicated?: boolean;
+    provider?: string;
+  }>(res, 'Failed to send WhatsApp signal alert');
+}
+
+export async function sendWhatsAppTestAlert(): Promise<{
+  ok: boolean;
+  sent?: boolean;
+  provider?: string;
+}> {
+  const res = await fetch('/api/notifications/whatsapp', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'test' }),
+  });
+  return parseJsonSafe<{ ok: boolean; sent?: boolean; provider?: string }>(
+    res,
+    'Failed to send test WhatsApp message'
+  );
 }

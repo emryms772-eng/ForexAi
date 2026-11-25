@@ -1,8 +1,10 @@
 import {
   ArrowDownRight,
   ArrowUpRight,
+  MessageSquare,
   Play,
   RotateCcw,
+  Send,
   ShieldCheck,
   Square,
   X,
@@ -15,6 +17,7 @@ import type {
   AutoScanScope,
   AutoTradeConfig,
   DemoAccountState,
+  WhatsAppConfigStatus,
 } from '../types/market';
 
 interface DemoTradingPanelProps {
@@ -23,6 +26,9 @@ interface DemoTradingPanelProps {
   selectedSymbol: string;
   nextScanSecondsLeft: number | null;
   lastExecutionNote: string | null;
+  whatsappStatus: WhatsAppConfigStatus | null;
+  whatsappSending: boolean;
+  onTestWhatsApp: () => void;
   onUpdateConfig: (patch: Partial<AutoTradeConfig>) => void;
   onExecuteSignal: (signal: AIPriceActionSignal) => void;
   onClosePosition: (positionId: string) => void;
@@ -46,6 +52,9 @@ export function DemoTradingPanel({
   selectedSymbol,
   nextScanSecondsLeft,
   lastExecutionNote,
+  whatsappStatus,
+  whatsappSending,
+  onTestWhatsApp,
   onUpdateConfig,
   onExecuteSignal,
   onClosePosition,
@@ -303,13 +312,98 @@ export function DemoTradingPanel({
             <button
               type="button"
               onClick={() => onExecuteSignal(activeSignal)}
-              className="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-blue-500 whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-blue-500 whitespace-nowrap shrink-0 cursor-pointer"
             >
               <span>
                 Execute {activeSignal.plan.signal} {activeSignal.symbol}
               </span>
             </button>
           )}
+        </div>
+      </div>
+
+      {/* WhatsApp Auto-Scan Signal Alerts Bar */}
+      <div className="flex flex-col gap-2.5 border-b border-slate-800/80 bg-[#0B0F17]/60 px-5 py-3 text-xs lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2">
+            <MessageSquare className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
+            <span className="font-medium text-slate-200">WhatsApp Auto-Scan:</span>
+            <button
+              type="button"
+              onClick={() =>
+                onUpdateConfig({
+                  whatsappAlertsEnabled: !demoAccount.config.whatsappAlertsEnabled,
+                })
+              }
+              className={`rounded-md border px-2.5 py-1 text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                demoAccount.config.whatsappAlertsEnabled
+                  ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300'
+                  : 'border-slate-700 bg-[#0B0F17] text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              {demoAccount.config.whatsappAlertsEnabled ? 'On' : 'Off'}
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-slate-400">Notify:</span>
+            <div
+              role="group"
+              aria-label="WhatsApp alert filter"
+              className="flex items-center gap-1 rounded-md border border-slate-800 bg-[#0B0F17] p-0.5"
+            >
+              <button
+                type="button"
+                onClick={() => onUpdateConfig({ whatsappNotifyWait: true })}
+                className={`rounded px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                  demoAccount.config.whatsappNotifyWait
+                    ? 'bg-slate-800 text-slate-100'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                All Scans (incl. WAIT)
+              </button>
+              <button
+                type="button"
+                onClick={() => onUpdateConfig({ whatsappNotifyWait: false })}
+                className={`rounded px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                  !demoAccount.config.whatsappNotifyWait
+                    ? 'bg-slate-800 text-slate-100'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                BUY / SELL Only
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          {whatsappStatus?.configured ? (
+            <span className="text-[11px] text-emerald-300">
+              Connected via {whatsappStatus.provider} ({whatsappStatus.recipientMasked})
+            </span>
+          ) : (
+            <span className="text-[11px] text-slate-400">
+              Add <span className="font-mono text-slate-300">WHATSAPP_TO_PHONE</span> +{' '}
+              <span className="font-mono text-slate-300">CALLMEBOT_API_KEY</span> (or Meta Cloud / Twilio) in Settings &gt; Secrets to receive automatic alerts.
+            </span>
+          )}
+
+          <button
+            type="button"
+            onClick={onTestWhatsApp}
+            disabled={whatsappSending || !whatsappStatus?.configured}
+            title={
+              whatsappStatus?.configured
+                ? 'Send a test WhatsApp alert to your configured number'
+                : 'Configure WhatsApp server secrets first'
+            }
+            className="inline-flex min-h-[32px] items-center gap-1.5 rounded-md border border-slate-700 bg-[#0B0F17] px-2.5 py-1 text-[11px] font-medium text-slate-200 transition-colors hover:border-emerald-500/50 hover:text-emerald-300 disabled:opacity-40 whitespace-nowrap cursor-pointer"
+          >
+            <Send className="h-3 w-3" aria-hidden="true" />
+            <span>{whatsappSending ? 'Sending...' : 'Test WhatsApp'}</span>
+          </button>
         </div>
       </div>
 
