@@ -204,7 +204,7 @@ export function BacktestPanel({
             <span className="font-mono tabular-nums text-slate-300">
               {riskPercentPerTrade}%
             </span>{' '}
-            risk per trade using confirmed swing pivots, liquidity sweeps, OB/FVG mitigations, and SL-first intrabar checks.
+            risk per trade with 1H/4H structural bias alignment, deep discount/premium pricing, and post-sweep displacement confirmation.
           </p>
         </div>
 
@@ -376,62 +376,77 @@ export function BacktestPanel({
 
               <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
                 {/* Setup Performance Breakdown */}
-                <div className="xl:col-span-6 rounded border border-slate-800/80 bg-[#0B0F17] overflow-hidden">
-                  <div className="border-b border-slate-800/80 px-4 py-2.5 text-xs font-semibold text-slate-200">
-                    Setup Breakdown (Non-Repainting Signals)
-                  </div>
-                  {backtest.setupBreakdown.length === 0 ? (
-                    <div className="p-4 text-xs text-slate-400">
-                      No qualifying setups triggered across this closed-bar window.
+                <div className="xl:col-span-6 rounded border border-slate-800/80 bg-[#0B0F17] overflow-hidden flex flex-col justify-between">
+                  <div>
+                    <div className="border-b border-slate-800/80 px-4 py-2.5 text-xs font-semibold text-slate-200">
+                      Setup Breakdown (Non-Repainting Signals)
                     </div>
-                  ) : (
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-left text-xs">
-                        <thead>
-                          <tr className="border-b border-slate-800/70 text-slate-400">
-                            <th className="px-4 py-2 font-medium">Setup Archetype</th>
-                            <th className="px-4 py-2 font-medium text-right">Trades</th>
-                            <th className="px-4 py-2 font-medium text-right">Win %</th>
-                            <th className="px-4 py-2 font-medium text-right">Net R</th>
-                            <th className="px-4 py-2 font-medium text-right">Net P&amp;L</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-800/50">
-                          {backtest.setupBreakdown.map((row) => (
-                            <tr key={row.setupType}>
-                              <td className="px-4 py-2 font-medium text-slate-200">
-                                {row.setupType}
-                              </td>
-                              <td className="px-4 py-2 text-right font-mono tabular-nums text-slate-300">
-                                {row.trades}
-                              </td>
-                              <td className="px-4 py-2 text-right font-mono tabular-nums text-slate-300">
-                                {row.winRatePct}%
-                              </td>
-                              <td
-                                className={`px-4 py-2 text-right font-mono tabular-nums font-medium ${
-                                  row.netR >= 0
-                                    ? 'text-emerald-400'
-                                    : 'text-rose-400'
-                                }`}
-                              >
-                                {row.netR >= 0 ? '+' : ''}
-                                {row.netR.toFixed(2)}R
-                              </td>
-                              <td
-                                className={`px-4 py-2 text-right font-mono tabular-nums font-semibold ${
-                                  row.netPnlUsd >= 0
-                                    ? 'text-emerald-400'
-                                    : 'text-rose-400'
-                                }`}
-                              >
-                                {row.netPnlUsd >= 0 ? '+' : ''}$
-                                {row.netPnlUsd.toFixed(2)}
-                              </td>
+                    {backtest.setupBreakdown.length === 0 ? (
+                      <div className="p-4 text-xs text-slate-400">
+                        No qualifying setups passed all three institutional filters across this closed-bar window.
+                      </div>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left text-xs">
+                          <thead>
+                            <tr className="border-b border-slate-800/70 text-slate-400">
+                              <th className="px-4 py-2 font-medium">Setup Archetype</th>
+                              <th className="px-4 py-2 font-medium text-right">Trades</th>
+                              <th className="px-4 py-2 font-medium text-right">Win %</th>
+                              <th className="px-4 py-2 font-medium text-right">Net R</th>
+                              <th className="px-4 py-2 font-medium text-right">Net P&amp;L</th>
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                          </thead>
+                          <tbody className="divide-y divide-slate-800/50">
+                            {backtest.setupBreakdown.map((row) => (
+                              <tr key={row.setupType}>
+                                <td className="px-4 py-2 font-medium text-slate-200">
+                                  {row.setupType}
+                                </td>
+                                <td className="px-4 py-2 text-right font-mono tabular-nums text-slate-300">
+                                  {row.trades}
+                                </td>
+                                <td className="px-4 py-2 text-right font-mono tabular-nums text-slate-300">
+                                  {row.winRatePct}%
+                                </td>
+                                <td
+                                  className={`px-4 py-2 text-right font-mono tabular-nums font-medium ${
+                                    row.netR >= 0
+                                      ? 'text-emerald-400'
+                                      : 'text-rose-400'
+                                  }`}
+                                >
+                                  {row.netR >= 0 ? '+' : ''}
+                                  {row.netR.toFixed(2)}R
+                                </td>
+                                <td
+                                  className={`px-4 py-2 text-right font-mono tabular-nums font-semibold ${
+                                    row.netPnlUsd >= 0
+                                      ? 'text-emerald-400'
+                                      : 'text-rose-400'
+                                  }`}
+                                >
+                                  {row.netPnlUsd >= 0 ? '+' : ''}$
+                                  {row.netPnlUsd.toFixed(2)}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+
+                  {backtest.filterStats && (
+                    <div className="border-t border-slate-800/80 px-4 py-2.5 text-[11px] text-slate-400 flex flex-wrap items-center justify-between gap-2">
+                      <span>
+                        Causal Filters Active: 1H/4H Bias · Discount/Premium · Displacement
+                      </span>
+                      <span className="font-mono tabular-nums text-slate-300">
+                        Filtered {backtest.filterStats.rejectedByHtfBias} HTF ·{' '}
+                        {backtest.filterStats.rejectedByPremiumDiscount} P/D ·{' '}
+                        {backtest.filterStats.rejectedByDisplacement} Disp
+                      </span>
                     </div>
                   )}
                 </div>

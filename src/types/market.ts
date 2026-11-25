@@ -268,6 +268,14 @@ export interface BacktestResult {
   expectancyR: number;
   maxDrawdownPct: number;
   nonRepaintingVerified: boolean;
+  appliedFilters?: string[];
+  filterStats?: {
+    candidatesEvaluated: number;
+    rejectedByHtfBias: number;
+    rejectedByPremiumDiscount: number;
+    rejectedByDisplacement: number;
+    qualifiedSetups: number;
+  };
   setupBreakdown: BacktestSetupStats[];
   equityCurve: BacktestEquityPoint[];
   trades: BacktestTrade[];

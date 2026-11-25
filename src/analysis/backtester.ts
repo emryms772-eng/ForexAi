@@ -1,10 +1,11 @@
-import { getInstrumentBySymbol } from '../config/instruments.ts';
+import { TIMEFRAME_SECONDS, getInstrumentBySymbol } from '../config/instruments.ts';
 import type {
   BacktestEquityPoint,
   BacktestResult,
   BacktestSetupStats,
   BacktestTrade,
   OHLCVCandle,
+  PriceActionAnalysisSummary,
   Timeframe,
 } from '../types/market.ts';
 import { analyzePriceAction } from './priceAction.ts';
@@ -27,142 +28,675 @@ interface CandidateSetup {
   takeProfit2: number;
 }
 
+interface FilterCounters {
+  candidatesEvaluated: number;
+  rejectedByHtfBias: number;
+  rejectedByPremiumDiscount: number;
+  rejectedByDisplacement: number;
+  qualifiedSetups: number;
+}
+
+interface HtfBiasAssessment {
+  allowsBuy: boolean;
+  allowsSell: boolean;
+  dominantSweep: 'Bullish' | 'Bearish' | 'None';
+  rangePos1hPct: number | null;
+  summary1h: string;
+  summary4h: string;
+}
+
+function aggregateCandlesCausally(
+  candles: OHLCVCandle[],
+  groupSize: number
+): OHLCVCandle[] {
+  if (groupSize <= 1 || candles.length < groupSize * 4) return candles;
+  const usableCount = Math.floor(candles.length / groupSize) * groupSize;
+  const startOffset = candles.length - usableCount;
+  const aggregated: OHLCVCandle[] = [];
+
+  for (let i = startOffset; i < candles.length; i += groupSize) {
+    const chunk = candles.slice(i, i + groupSize);
+    if (chunk.length < groupSize) break;
+    aggregated.push({
+      time: chunk[0].time,
+      open: chunk[0].open,
+      high: Math.max(...chunk.map((c) => c.high)),
+      low: Math.min(...chunk.map((c) => c.low)),
+      close: chunk[chunk.length - 1].close,
+      volume: chunk.reduce((sum, c) => sum + c.volume, 0),
+    });
+  }
+  return aggregated;
+}
+
+function scoreAnalysisBias(summary: PriceActionAnalysisSummary): {
+  bullScore: number;
+  bearScore: number;
+  sweepBias: 'Bullish' | 'Bearish' | 'None';
+} {
+  const { snapshot } = summary;
+  let bullScore = 0;
+  let bearScore = 0;
+  let sweepBias: 'Bullish' | 'Bearish' | 'None' = 'None';
+
+  if (snapshot.recentSweep === 'Sell-Side Sweep (Bullish)') {
+    bullScore += 1.75;
+    sweepBias = 'Bullish';
+  } else if (snapshot.recentSweep === 'Buy-Side Sweep (Bearish)') {
+    bearScore += 1.75;
+    sweepBias = 'Bearish';
+  }
+
+  if (snapshot.trendStructure === 'Bullish (HH / HL)') {
+    bullScore += 1.5;
+  } else if (snapshot.trendStructure === 'Bearish (LH / LL)') {
+    bearScore += 1.5;
+  }
+
+  if (snapshot.latestStructureEvent.startsWith('Bullish')) {
+    bullScore += 1.5;
+  } else if (snapshot.latestStructureEvent.startsWith('Bearish')) {
+    bearScore += 1.5;
+  }
+
+  if (snapshot.buyerPressurePct >= 55) {
+    bullScore += 0.5;
+  } else if (snapshot.buyerPressurePct <= 45) {
+    bearScore += 0.5;
+  }
+
+  return { bullScore, bearScore, sweepBias };
+}
+
 /**
- * Strictly causal setup evaluation at closed bar index `barIndex` using ONLY
- * candles[0..barIndex]. Zero future bars are ever inspected.
+ * Strictly causal Higher-Timeframe (1H / 4H) structural bias & dominant sweep filter.
+ * Only inspects HTF candles whose period has fully closed at or before `signalCloseTime`.
  */
-function evaluateCausalSetupAtBar(
-  closedSlice: OHLCVCandle[],
-  decimals: number
-): CandidateSetup | null {
-  if (closedSlice.length < 40) return null;
+function evaluateCausalHtfBias(params: {
+  closedSlice: OHLCVCandle[];
+  ltfTimeframe: Timeframe;
+  decimals: number;
+  htf1hCandles?: OHLCVCandle[];
+  htf4hCandles?: OHLCVCandle[];
+  htfAligned?: boolean;
+}): HtfBiasAssessment {
+  const {
+    closedSlice,
+    ltfTimeframe,
+    decimals,
+    htf1hCandles,
+    htf4hCandles,
+    htfAligned,
+  } = params;
 
-  const summary = analyzePriceAction(closedSlice, decimals, {
-    excludeFormingBar: false, // closedSlice[last] is already a closed bar in the historical walk
-  });
-  const { snapshot, levels, zones, recentPatterns } = summary;
   const signalBar = closedSlice[closedSlice.length - 1];
-  const avgRange = Math.max(snapshot.avgCandleRange, signalBar.close * 0.0005);
+  const ltfSeconds = TIMEFRAME_SECONDS[ltfTimeframe];
+  const signalCloseTime = signalBar.time + ltfSeconds;
 
-  const latestPattern = recentPatterns.find((p) => p.time === signalBar.time);
+  let slice1h: OHLCVCandle[] = [];
+  let slice4h: OHLCVCandle[] = [];
 
-  // Setup 1: Liquidity Sweep + Rejection/Engulfing Reversal (non-repainting closed trigger)
-  if (
-    latestPattern &&
-    (latestPattern.name.includes('Sweep') ||
-      latestPattern.name.includes('Engulfing') ||
-      latestPattern.name.includes('Pin Bar'))
-  ) {
+  if (htfAligned) {
+    if (htf1hCandles && htf1hCandles.length > 0 && ltfTimeframe !== '4H') {
+      slice1h = htf1hCandles.filter((c) => c.time + 3600 <= signalCloseTime);
+    }
+    if (htf4hCandles && htf4hCandles.length > 0) {
+      slice4h = htf4hCandles.filter((c) => c.time + 14400 <= signalCloseTime);
+    }
+  }
+
+  // Fallback to causal macro aggregation from the LTF stream when external HTF
+  // history isn't aligned (e.g. synthetic volatility indices or short samples)
+  if (slice1h.length < 24) {
+    const group1h =
+      ltfTimeframe === '1M'
+        ? 12
+        : ltfTimeframe === '5M'
+        ? 6
+        : ltfTimeframe === '15M'
+        ? 4
+        : 2;
+    slice1h = aggregateCandlesCausally(closedSlice, group1h);
+  }
+  if (slice4h.length < 18) {
+    const group4h =
+      ltfTimeframe === '1M'
+        ? 24
+        : ltfTimeframe === '5M'
+        ? 12
+        : ltfTimeframe === '15M'
+        ? 8
+        : 4;
+    slice4h = aggregateCandlesCausally(closedSlice, group4h);
+  }
+
+  let bull1h = 0;
+  let bear1h = 0;
+  let bull4h = 0;
+  let bear4h = 0;
+  let sweep1h: 'Bullish' | 'Bearish' | 'None' = 'None';
+  let sweep4h: 'Bullish' | 'Bearish' | 'None' = 'None';
+  let rangePos1hPct: number | null = null;
+  let summary1h = 'Neutral';
+  let summary4h = 'Neutral';
+
+  if (slice1h.length >= 16) {
+    const pa1h = analyzePriceAction(slice1h, decimals, {
+      excludeFormingBar: false,
+    });
+    const scored1h = scoreAnalysisBias(pa1h);
+    bull1h = scored1h.bullScore;
+    bear1h = scored1h.bearScore;
+    sweep1h = scored1h.sweepBias;
+    const span1h = Math.max(
+      pa1h.snapshot.dealingRangeHigh - pa1h.snapshot.dealingRangeLow,
+      1e-9
+    );
+    rangePos1hPct = Math.min(
+      100,
+      Math.max(
+        0,
+        ((signalBar.close - pa1h.snapshot.dealingRangeLow) / span1h) * 100
+      )
+    );
+    summary1h = `${pa1h.snapshot.trendStructure} / ${pa1h.snapshot.latestStructureEvent}`;
+  }
+
+  if (slice4h.length >= 14) {
+    const pa4h = analyzePriceAction(slice4h, decimals, {
+      excludeFormingBar: false,
+    });
+    const scored4h = scoreAnalysisBias(pa4h);
+    bull4h = scored4h.bullScore;
+    bear4h = scored4h.bearScore;
+    sweep4h = scored4h.sweepBias;
+    summary4h = `${pa4h.snapshot.trendStructure} / ${pa4h.snapshot.latestStructureEvent}`;
+  }
+
+  const dominantSweep: 'Bullish' | 'Bearish' | 'None' =
+    sweep1h !== 'None' && sweep4h === sweep1h
+      ? sweep1h
+      : sweep1h !== 'None' && sweep4h === 'None'
+      ? sweep1h
+      : sweep4h !== 'None' && sweep1h === 'None'
+      ? sweep4h
+      : 'None';
+
+  const totalBull = bull1h + bull4h * 1.15;
+  const totalBear = bear1h + bear4h * 1.15;
+
+  const h1Bull = bull1h > bear1h + 0.4 || sweep1h === 'Bullish';
+  const h1Bear = bear1h > bull1h + 0.4 || sweep1h === 'Bearish';
+  const h4Bull = bull4h > bear4h + 0.4 || sweep4h === 'Bullish';
+  const h4Bear = bear4h > bull4h + 0.4 || sweep4h === 'Bearish';
+
+  const allowsBuy =
+    dominantSweep !== 'Bearish' &&
+    (totalBull >= totalBear || (h1Bull && !(h4Bear && sweep4h === 'Bearish')));
+  const allowsSell =
+    dominantSweep !== 'Bullish' &&
+    (totalBear >= totalBull || (h1Bear && !(h4Bull && sweep4h === 'Bullish')));
+
+  return {
+    allowsBuy,
+    allowsSell,
+    dominantSweep,
+    rangePos1hPct,
+    summary1h,
+    summary4h,
+  };
+}
+
+function hasMeaningfulVolumeVariance(candles: OHLCVCandle[]): boolean {
+  const sample = candles.slice(-20);
+  if (sample.length < 5) return false;
+  const first = sample[0].volume;
+  return sample.some((c) => Math.abs(c.volume - first) > 1);
+}
+
+interface SweepMatch {
+  sweepBar: OHLCVCandle;
+  extremePrice: number;
+}
+
+function findRecentCausalSweepBar(
+  closedSlice: OHLCVCandle[],
+  side: 'BUY' | 'SELL',
+  avgRange: number
+): SweepMatch | null {
+  // Inspect prior closed bars [len-6 .. len-2] so entries ONLY fire on subsequent displacement
+  const endIdx = closedSlice.length - 1;
+  const startIdx = Math.max(14, endIdx - 5);
+
+  for (let idx = endIdx - 1; idx >= startIdx; idx--) {
+    const bar = closedSlice[idx];
+    const priorWindow = closedSlice.slice(Math.max(0, idx - 26), idx - 2);
+    if (priorWindow.length < 6) continue;
+
+    if (side === 'BUY') {
+      const priorSwingLow = Math.min(...priorWindow.map((c) => c.low));
+      const singleBarSweep =
+        bar.low < priorSwingLow && bar.close > priorSwingLow;
+      const prevBar = closedSlice[idx - 1];
+      const twoBarSweep =
+        prevBar != null &&
+        prevBar.low < priorSwingLow &&
+        prevBar.close <= priorSwingLow &&
+        bar.close > priorSwingLow;
+
+      if (singleBarSweep || twoBarSweep) {
+        const extremePrice = twoBarSweep
+          ? Math.min(prevBar.low, bar.low)
+          : bar.low;
+        const heldSinceSweep = closedSlice
+          .slice(idx + 1)
+          .every((b) => b.low >= extremePrice - avgRange * 0.08);
+        if (heldSinceSweep) {
+          return { sweepBar: bar, extremePrice };
+        }
+      }
+    } else {
+      const priorSwingHigh = Math.max(...priorWindow.map((c) => c.high));
+      const singleBarSweep =
+        bar.high > priorSwingHigh && bar.close < priorSwingHigh;
+      const prevBar = closedSlice[idx - 1];
+      const twoBarSweep =
+        prevBar != null &&
+        prevBar.high > priorSwingHigh &&
+        prevBar.close >= priorSwingHigh &&
+        bar.close < priorSwingHigh;
+
+      if (singleBarSweep || twoBarSweep) {
+        const extremePrice = twoBarSweep
+          ? Math.max(prevBar.high, bar.high)
+          : bar.high;
+        const heldSinceSweep = closedSlice
+          .slice(idx + 1)
+          .every((b) => b.high <= extremePrice + avgRange * 0.08);
+        if (heldSinceSweep) {
+          return { sweepBar: bar, extremePrice };
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function isConfirmedDisplacementBar(
+  closedSlice: OHLCVCandle[],
+  side: 'BUY' | 'SELL',
+  sweepMatch: SweepMatch | null,
+  avgRange: number
+): { confirmed: boolean; reason: string } {
+  const signalBar = closedSlice[closedSlice.length - 1];
+  const prevBars = closedSlice.slice(-21, -1);
+  if (prevBars.length < 10) {
+    return { confirmed: false, reason: 'Insufficient lookback for displacement' };
+  }
+
+  const avgBody =
+    prevBars.reduce((acc, c) => acc + Math.abs(c.close - c.open), 0) /
+    prevBars.length;
+  const avgVol =
+    prevBars.reduce((acc, c) => acc + c.volume, 0) / prevBars.length;
+  const checkVolume = hasMeaningfulVolumeVariance(closedSlice) && avgVol > 0;
+
+  const barRange = Math.max(signalBar.high - signalBar.low, 1e-9);
+  const barBody = Math.abs(signalBar.close - signalBar.open);
+  const volumeExpansion = !checkVolume || signalBar.volume >= avgVol * 1.05;
+
+  // Avoid chasing exhausted parabolic outlier candles far from structural invalidation
+  if (barBody > avgRange * 2.8) {
+    return { confirmed: false, reason: 'Overextended displacement spike skipped' };
+  }
+
+  const prev2 = closedSlice[closedSlice.length - 3];
+
+  if (side === 'BUY') {
+    const bullishClose = signalBar.close > signalBar.open;
+    const closeStrength = (signalBar.close - signalBar.low) / barRange;
+    const expansionBody = barBody >= Math.max(avgBody * 1.08, avgRange * 0.5);
+    const clearedSweepHigh = sweepMatch
+      ? signalBar.close > sweepMatch.sweepBar.high
+      : true;
+    const createdBullFvg = prev2 ? prev2.high < signalBar.low : false;
+
     if (
-      latestPattern.bias === 'Bullish' &&
-      (snapshot.rangeZone === 'Discount' ||
-        snapshot.latestStructureEvent.startsWith('Bullish') ||
-        snapshot.recentSweep === 'Sell-Side Sweep (Bullish)')
+      bullishClose &&
+      closeStrength >= 0.58 &&
+      expansionBody &&
+      volumeExpansion &&
+      (clearedSweepHigh || createdBullFvg)
     ) {
-      const nearestSupport = levels.find((l) => l.type === 'Support');
-      const rawSl = Math.min(
-        signalBar.low - avgRange * 0.35,
-        nearestSupport ? nearestSupport.price - avgRange * 0.3 : signalBar.low
-      );
-      const risk = Math.max(signalBar.close - rawSl, avgRange * 0.75);
-      const sl = roundToDecimals(signalBar.close - risk, decimals);
-      const tp1 = roundToDecimals(signalBar.close + risk * 1.4, decimals);
-      const tp2 = roundToDecimals(signalBar.close + risk * 2.4, decimals);
-
       return {
-        side: 'BUY',
-        setupType:
-          snapshot.recentSweep === 'Sell-Side Sweep (Bullish)'
-            ? 'Sweep + Reclaim Reversal'
-            : 'Discount Demand Trigger',
-        trigger: latestPattern.name,
-        stopLoss: sl,
-        takeProfit1: tp1,
-        takeProfit2: tp2,
+        confirmed: true,
+        reason: checkVolume
+          ? 'High-Volume Bullish Displacement'
+          : 'Confirmed Bullish Displacement',
       };
     }
+  } else {
+    const bearishClose = signalBar.close < signalBar.open;
+    const closeStrength = (signalBar.high - signalBar.close) / barRange;
+    const expansionBody = barBody >= Math.max(avgBody * 1.08, avgRange * 0.5);
+    const clearedSweepLow = sweepMatch
+      ? signalBar.close < sweepMatch.sweepBar.low
+      : true;
+    const createdBearFvg = prev2 ? prev2.low > signalBar.high : false;
 
     if (
-      latestPattern.bias === 'Bearish' &&
-      (snapshot.rangeZone === 'Premium' ||
-        snapshot.latestStructureEvent.startsWith('Bearish') ||
-        snapshot.recentSweep === 'Buy-Side Sweep (Bearish)')
+      bearishClose &&
+      closeStrength >= 0.58 &&
+      expansionBody &&
+      volumeExpansion &&
+      (clearedSweepLow || createdBearFvg)
     ) {
-      const nearestRes = levels.find((l) => l.type === 'Resistance');
-      const rawSl = Math.max(
-        signalBar.high + avgRange * 0.35,
-        nearestRes ? nearestRes.price + avgRange * 0.3 : signalBar.high
-      );
-      const risk = Math.max(rawSl - signalBar.close, avgRange * 0.75);
-      const sl = roundToDecimals(signalBar.close + risk, decimals);
-      const tp1 = roundToDecimals(signalBar.close - risk * 1.4, decimals);
-      const tp2 = roundToDecimals(signalBar.close - risk * 2.4, decimals);
-
       return {
-        side: 'SELL',
-        setupType:
-          snapshot.recentSweep === 'Buy-Side Sweep (Bearish)'
-            ? 'Sweep + Rejection Reversal'
-            : 'Premium Supply Trigger',
-        trigger: latestPattern.name,
-        stopLoss: sl,
-        takeProfit1: tp1,
-        takeProfit2: tp2,
+        confirmed: true,
+        reason: checkVolume
+          ? 'High-Volume Bearish Displacement'
+          : 'Confirmed Bearish Displacement',
       };
     }
   }
 
-  // Setup 2: Fresh BOS / CHoCH + Order Block / FVG Mitigation Pullback
-  const touchedBullZone = zones.find(
+  return { confirmed: false, reason: 'Unconfirmed displacement' };
+}
+
+/**
+ * Strictly causal setup evaluation at closed bar index `barIndex` using ONLY
+ * candles[0..barIndex] and strictly closed higher-timeframe candles.
+ * Implements the 3 institutional filters:
+ *   1) Higher-Timeframe (1H/4H) Structural Bias & Dominant Sweep alignment
+ *   2) Deep Discount / Premium Pricing filter
+ *   3) Confirmed Post-Sweep High-Volume Displacement (no blind initial reclaim entries)
+ */
+function evaluateCausalSetupAtBar(params: {
+  closedSlice: OHLCVCandle[];
+  decimals: number;
+  timeframe: Timeframe;
+  htf1hCandles?: OHLCVCandle[];
+  htf4hCandles?: OHLCVCandle[];
+  htfAligned?: boolean;
+  counters: FilterCounters;
+}): CandidateSetup | null {
+  const {
+    closedSlice,
+    decimals,
+    timeframe,
+    htf1hCandles,
+    htf4hCandles,
+    htfAligned,
+    counters,
+  } = params;
+
+  if (closedSlice.length < 40) return null;
+
+  const summary = analyzePriceAction(closedSlice, decimals, {
+    excludeFormingBar: false,
+  });
+  const { snapshot, levels, zones } = summary;
+  const signalBar = closedSlice[closedSlice.length - 1];
+  const avgRange = Math.max(snapshot.avgCandleRange, signalBar.close * 0.0005);
+
+  const htf = evaluateCausalHtfBias({
+    closedSlice,
+    ltfTimeframe: timeframe,
+    decimals,
+    htf1hCandles,
+    htf4hCandles,
+    htfAligned,
+  });
+
+  // Compute macro 80-bar dealing range for true Premium/Discount origin pricing
+  const macroWindow = closedSlice.slice(-80);
+  const macroHigh = Math.max(...macroWindow.map((c) => c.high));
+  const macroLow = Math.min(...macroWindow.map((c) => c.low));
+  const macroSpan = Math.max(macroHigh - macroLow, 1e-9);
+  const ltfSpan = Math.max(
+    snapshot.dealingRangeHigh - snapshot.dealingRangeLow,
+    1e-9
+  );
+
+  const bullSweep = findRecentCausalSweepBar(closedSlice, 'BUY', avgRange);
+  const bearSweep = findRecentCausalSweepBar(closedSlice, 'SELL', avgRange);
+
+  const bullZoneTouch = zones.find(
     (z) =>
       (z.kind === 'Demand OB' || z.kind === 'Bullish FVG') &&
       signalBar.low <= z.high &&
       signalBar.close >= z.low
   );
-  if (
-    touchedBullZone &&
-    signalBar.close > signalBar.open &&
-    (snapshot.trendStructure === 'Bullish (HH / HL)' ||
-      snapshot.latestStructureEvent.startsWith('Bullish'))
-  ) {
-    const risk = Math.max(
-      signalBar.close - (touchedBullZone.low - avgRange * 0.35),
-      avgRange * 0.8
-    );
-    return {
-      side: 'BUY',
-      setupType: 'BOS Pullback to Zone',
-      trigger: `${touchedBullZone.kind} Mitigation`,
-      stopLoss: roundToDecimals(signalBar.close - risk, decimals),
-      takeProfit1: roundToDecimals(signalBar.close + risk * 1.5, decimals),
-      takeProfit2: roundToDecimals(signalBar.close + risk * 2.5, decimals),
-    };
-  }
-
-  const touchedBearZone = zones.find(
+  const bearZoneTouch = zones.find(
     (z) =>
       (z.kind === 'Supply OB' || z.kind === 'Bearish FVG') &&
       signalBar.high >= z.low &&
       signalBar.close <= z.high
   );
+
+  const candidates: Array<{
+    side: 'BUY' | 'SELL';
+    archetype: 'SweepDisplacement' | 'ZoneMitigation';
+    sweepMatch: SweepMatch | null;
+    zone: (typeof zones)[number] | null;
+  }> = [];
+
+  // Prioritize HTF-aligned BOS/FVG/OB zone pullbacks (formed by prior institutional displacement)
   if (
-    touchedBearZone &&
+    bullZoneTouch &&
+    signalBar.close > signalBar.open &&
+    (snapshot.trendStructure === 'Bullish (HH / HL)' ||
+      snapshot.latestStructureEvent.startsWith('Bullish'))
+  ) {
+    candidates.push({
+      side: 'BUY',
+      archetype: 'ZoneMitigation',
+      sweepMatch: null,
+      zone: bullZoneTouch,
+    });
+  }
+  if (
+    bearZoneTouch &&
     signalBar.close < signalBar.open &&
     (snapshot.trendStructure === 'Bearish (LH / LL)' ||
       snapshot.latestStructureEvent.startsWith('Bearish'))
   ) {
-    const risk = Math.max(
-      touchedBearZone.high + avgRange * 0.35 - signalBar.close,
-      avgRange * 0.8
-    );
-    return {
+    candidates.push({
       side: 'SELL',
-      setupType: 'BOS Pullback to Zone',
-      trigger: `${touchedBearZone.kind} Mitigation`,
-      stopLoss: roundToDecimals(signalBar.close + risk, decimals),
-      takeProfit1: roundToDecimals(signalBar.close - risk * 1.5, decimals),
-      takeProfit2: roundToDecimals(signalBar.close - risk * 2.5, decimals),
-    };
+      archetype: 'ZoneMitigation',
+      sweepMatch: null,
+      zone: bearZoneTouch,
+    });
+  }
+
+  // Post-sweep setups require subsequent displacement confirmation (never enter on initial reclaim)
+  if (bullSweep) {
+    candidates.push({
+      side: 'BUY',
+      archetype: 'SweepDisplacement',
+      sweepMatch: bullSweep,
+      zone: null,
+    });
+  }
+  if (bearSweep) {
+    candidates.push({
+      side: 'SELL',
+      archetype: 'SweepDisplacement',
+      sweepMatch: bearSweep,
+      zone: null,
+    });
+  }
+
+  for (const cand of candidates) {
+    counters.candidatesEvaluated += 1;
+
+    // Filter 1: Higher-Timeframe (1H/4H) Structural Bias & Dominant Sweep Alignment
+    const alignsHtfBias =
+      cand.side === 'BUY' ? htf.allowsBuy : htf.allowsSell;
+
+    if (!alignsHtfBias) {
+      counters.rejectedByHtfBias += 1;
+      continue;
+    }
+
+    // Filter 2: Premium-to-Discount Pricing Filter
+    const originPrice =
+      cand.side === 'BUY'
+        ? cand.sweepMatch?.extremePrice ?? cand.zone?.midpoint ?? signalBar.low
+        : cand.sweepMatch?.extremePrice ?? cand.zone?.midpoint ?? signalBar.high;
+
+    const originLtfPct =
+      ((originPrice - snapshot.dealingRangeLow) / ltfSpan) * 100;
+    const originMacroPct = ((originPrice - macroLow) / macroSpan) * 100;
+    const closeMacroPct = ((signalBar.close - macroLow) / macroSpan) * 100;
+
+    if (cand.archetype === 'SweepDisplacement') {
+      // Sweep reversals restricted strictly to Deep Discount (<= 38%) for BUY / Premium (>= 62%) for SELL
+      const inDeepDiscount =
+        cand.side === 'BUY' &&
+        (originLtfPct <= 38 ||
+          originMacroPct <= 38 ||
+          (htf.rangePos1hPct !== null && htf.rangePos1hPct <= 38)) &&
+        closeMacroPct <= 60;
+
+      const inDeepPremium =
+        cand.side === 'SELL' &&
+        (originLtfPct >= 62 ||
+          originMacroPct >= 62 ||
+          (htf.rangePos1hPct !== null && htf.rangePos1hPct >= 62)) &&
+        closeMacroPct >= 40;
+
+      if (
+        (cand.side === 'BUY' && !inDeepDiscount) ||
+        (cand.side === 'SELL' && !inDeepPremium)
+      ) {
+        counters.rejectedByPremiumDiscount += 1;
+        continue;
+      }
+
+      // Filter 3: Confirmed Post-Sweep High-Volume Displacement
+      const displacement = isConfirmedDisplacementBar(
+        closedSlice,
+        cand.side,
+        cand.sweepMatch,
+        avgRange
+      );
+      if (!displacement.confirmed) {
+        counters.rejectedByDisplacement += 1;
+        continue;
+      }
+
+      const structuralExtreme =
+        cand.side === 'BUY'
+          ? Math.min(cand.sweepMatch!.extremePrice, signalBar.low) - avgRange * 0.25
+          : Math.max(cand.sweepMatch!.extremePrice, signalBar.high) + avgRange * 0.25;
+
+      const rawRisk =
+        cand.side === 'BUY'
+          ? signalBar.close - structuralExtreme
+          : structuralExtreme - signalBar.close;
+
+      // Skip entries whose stop-loss distance is abnormally wide (chasing extended impulse)
+      if (rawRisk > avgRange * 3.4) {
+        counters.rejectedByDisplacement += 1;
+        continue;
+      }
+
+      const risk = Math.max(rawRisk, avgRange * 0.85);
+      counters.qualifiedSetups += 1;
+
+      if (cand.side === 'BUY') {
+        const sl = roundToDecimals(signalBar.close - risk, decimals);
+        return {
+          side: 'BUY',
+          setupType: 'Sweep + Displacement Reversal',
+          trigger: `${displacement.reason} · HTF ${htf.summary1h.split(' / ')[0]}`,
+          stopLoss: sl,
+          takeProfit1: roundToDecimals(signalBar.close + risk * 1.4, decimals),
+          takeProfit2: roundToDecimals(signalBar.close + risk * 2.4, decimals),
+        };
+      } else {
+        const sl = roundToDecimals(signalBar.close + risk, decimals);
+        return {
+          side: 'SELL',
+          setupType: 'Sweep + Displacement Reversal',
+          trigger: `${displacement.reason} · HTF ${htf.summary1h.split(' / ')[0]}`,
+          stopLoss: sl,
+          takeProfit1: roundToDecimals(signalBar.close - risk * 1.4, decimals),
+          takeProfit2: roundToDecimals(signalBar.close - risk * 2.4, decimals),
+        };
+      }
+    } else {
+      // Zone Mitigation (OB / FVG formed by prior displacement): enforce Discount (<=46%) / Premium (>=54%)
+      const zoneInDiscount =
+        cand.side === 'BUY' &&
+        (originLtfPct <= 46 ||
+          originMacroPct <= 46 ||
+          (htf.rangePos1hPct !== null && htf.rangePos1hPct <= 44)) &&
+        closeMacroPct <= 60;
+      const zoneInPremium =
+        cand.side === 'SELL' &&
+        (originLtfPct >= 54 ||
+          originMacroPct >= 54 ||
+          (htf.rangePos1hPct !== null && htf.rangePos1hPct >= 56)) &&
+        closeMacroPct >= 40;
+
+      if (
+        (cand.side === 'BUY' && !zoneInDiscount) ||
+        (cand.side === 'SELL' && !zoneInPremium)
+      ) {
+        counters.rejectedByPremiumDiscount += 1;
+        continue;
+      }
+
+      // Require decisive reaction close off the zone
+      const barRange = Math.max(signalBar.high - signalBar.low, 1e-9);
+      const barBody = Math.abs(signalBar.close - signalBar.open);
+      const closeStrength =
+        cand.side === 'BUY'
+          ? (signalBar.close - signalBar.low) / barRange
+          : (signalBar.high - signalBar.close) / barRange;
+
+      if (closeStrength < 0.54 || barBody < avgRange * 0.3) {
+        counters.rejectedByDisplacement += 1;
+        continue;
+      }
+
+      counters.qualifiedSetups += 1;
+
+      if (cand.side === 'BUY') {
+        const nearestSupport = levels.find((l) => l.type === 'Support');
+        const rawSl = Math.min(
+          cand.zone!.low - avgRange * 0.35,
+          nearestSupport ? nearestSupport.price - avgRange * 0.2 : cand.zone!.low
+        );
+        const risk = Math.max(signalBar.close - rawSl, avgRange * 0.8);
+        return {
+          side: 'BUY',
+          setupType: 'BOS Pullback to Zone',
+          trigger: `${cand.zone!.kind} Mitigation · HTF Aligned`,
+          stopLoss: roundToDecimals(signalBar.close - risk, decimals),
+          takeProfit1: roundToDecimals(signalBar.close + risk * 1.5, decimals),
+          takeProfit2: roundToDecimals(signalBar.close + risk * 2.5, decimals),
+        };
+      } else {
+        const nearestRes = levels.find((l) => l.type === 'Resistance');
+        const rawSl = Math.max(
+          cand.zone!.high + avgRange * 0.35,
+          nearestRes ? nearestRes.price + avgRange * 0.2 : cand.zone!.high
+        );
+        const risk = Math.max(rawSl - signalBar.close, avgRange * 0.8);
+        return {
+          side: 'SELL',
+          setupType: 'BOS Pullback to Zone',
+          trigger: `${cand.zone!.kind} Mitigation · HTF Aligned`,
+          stopLoss: roundToDecimals(signalBar.close + risk, decimals),
+          takeProfit1: roundToDecimals(signalBar.close - risk * 1.5, decimals),
+          takeProfit2: roundToDecimals(signalBar.close - risk * 2.5, decimals),
+        };
+      }
+    }
   }
 
   return null;
@@ -172,6 +706,9 @@ export function runNonRepaintingBacktest(params: {
   symbol: string;
   timeframe: Timeframe;
   candles: OHLCVCandle[];
+  htf1hCandles?: OHLCVCandle[];
+  htf4hCandles?: OHLCVCandle[];
+  htfAligned?: boolean;
   initialCapital?: number;
   riskPercentPerTrade?: number;
 }): BacktestResult {
@@ -179,6 +716,9 @@ export function runNonRepaintingBacktest(params: {
     symbol,
     timeframe,
     candles,
+    htf1hCandles,
+    htf4hCandles,
+    htfAligned = false,
     initialCapital = 10000,
     riskPercentPerTrade = 1,
   } = params;
@@ -195,6 +735,13 @@ export function runNonRepaintingBacktest(params: {
 
   const trades: BacktestTrade[] = [];
   const equityCurve: BacktestEquityPoint[] = [];
+  const filterCounters: FilterCounters = {
+    candidatesEvaluated: 0,
+    rejectedByHtfBias: 0,
+    rejectedByPremiumDiscount: 0,
+    rejectedByDisplacement: 0,
+    qualifiedSetups: 0,
+  };
 
   if (closedCandles.length > warmupBars) {
     equityCurve.push({
@@ -206,7 +753,15 @@ export function runNonRepaintingBacktest(params: {
   let i = warmupBars;
   while (i < closedCandles.length - 2) {
     const causalSlice = closedCandles.slice(0, i + 1);
-    const setup = evaluateCausalSetupAtBar(causalSlice, decimals);
+    const setup = evaluateCausalSetupAtBar({
+      closedSlice: causalSlice,
+      decimals,
+      timeframe,
+      htf1hCandles,
+      htf4hCandles,
+      htfAligned,
+      counters: filterCounters,
+    });
 
     if (!setup) {
       i += 1;
@@ -388,6 +943,12 @@ export function runNonRepaintingBacktest(params: {
     expectancyR,
     maxDrawdownPct: Math.round(maxDrawdownPct * 100) / 100,
     nonRepaintingVerified: true,
+    appliedFilters: [
+      '1H/4H Structural Bias & Dominant Sweep Filter',
+      'Deep Discount (≤38%) / Premium (≥62%) Pricing Filter',
+      'Post-Sweep High-Volume Displacement Confirmation',
+    ],
+    filterStats: filterCounters,
     setupBreakdown: Array.from(setupMap.values()).sort(
       (a, b) => b.netPnlUsd - a.netPnlUsd
     ),

@@ -57,15 +57,28 @@ export default async function handler(
       ? (body.candles as OHLCVCandle[])
       : [];
 
-    const candles =
+    const [ltfData, h1Data, h4Data] = await Promise.all([
       clientCandles.length >= 260
-        ? clientCandles
-        : (await getMarketCandles(instrument.symbol, timeframe, 280)).candles;
+        ? Promise.resolve(null)
+        : getMarketCandles(instrument.symbol, timeframe, 420),
+      getMarketCandles(instrument.symbol, '1H', 220),
+      getMarketCandles(instrument.symbol, '4H', 160),
+    ]);
+
+    const candles =
+      clientCandles.length >= 260 ? clientCandles : ltfData!.candles;
+    const htfAligned =
+      h1Data.source === 'live-api' &&
+      h4Data.source === 'live-api' &&
+      (ltfData ? ltfData.source === 'live-api' : true);
 
     const backtest = runNonRepaintingBacktest({
       symbol: instrument.symbol,
       timeframe,
       candles,
+      htf1hCandles: h1Data.candles,
+      htf4hCandles: h4Data.candles,
+      htfAligned,
       initialCapital: 10000,
       riskPercentPerTrade,
     });

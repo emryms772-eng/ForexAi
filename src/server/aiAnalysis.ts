@@ -398,14 +398,15 @@ export async function generatePriceActionSignal(params: {
   const systemInstruction = [
     'You are an institutional top-down multi-timeframe pure price-action analyst.',
     'You are given pure OHLC price action across ALL 5 timeframes (1M, 5M, 15M, 1H, 4H) with zero lagging indicators.',
-    'Perform a top-down analysis: evaluate higher-timeframe structure and liquidity (4H and 1H), mid-timeframe Order Blocks and FVGs (15M), and lower-timeframe execution triggers like CHoCH, BOS, liquidity sweeps, engulfings, and pin bars (5M and 1M).',
+    'Perform a top-down analysis: evaluate higher-timeframe structure and dominant liquidity sweeps (4H and 1H), mid-timeframe Order Blocks and FVGs (15M), and lower-timeframe execution triggers (5M and 1M).',
+    'MANDATORY EXECUTION FILTERS: (1) Only issue BUY or SELL if aligned with the dominant 1H/4H structural bias and liquidity sweep; (2) Restrict BUY entries to Discount/Deep Discount zones (<= 42% of dealing range) and SELL entries to Premium zones (>= 58% of dealing range); (3) After a liquidity sweep, require a confirmed displacement (strong expansion body + volume/FVG follow-through) rather than entering blindly on the initial reclaim candle.',
     'CRITICAL RULE: Do NOT use, mention, or rely on lagging indicators such as RSI, MACD, EMA, SMA, Stochastics, or Bollinger Bands.',
     'Select the single best signalTimeframe (one of: 1M, 5M, 15M, 1H, 4H) where the cleanest price-action entry trigger and risk-to-reward setup is currently aligned.',
     'Provide a concise timeframeAlignment array covering all 5 timeframes (4H, 1H, 15M, 5M, 1M).',
     `All price levels must be realistic relative to currentPrice (${currentPrice}) and rounded to ${instrument.decimals} decimal places.`,
     'For a BUY signal: stopLoss < entryPrice < takeProfit1 < takeProfit2.',
     'For a SELL signal: takeProfit2 < takeProfit1 < entryPrice < stopLoss.',
-    'If multi-timeframe structure conflicts with no clean risk-reward edge, output signal "WAIT" and explain which timeframe level needs to break or sweep first.',
+    'If multi-timeframe structure conflicts, price is not in proper discount/premium, or post-sweep displacement is unconfirmed, output signal "WAIT" and explain which structural level or displacement must confirm first.',
     'Never promise guaranteed profits.',
   ].join(' ');
 
@@ -635,6 +636,8 @@ export async function generateBacktestReview(
     profitFactor: backtest.profitFactor,
     expectancyR: backtest.expectancyR,
     maxDrawdownPct: backtest.maxDrawdownPct,
+    appliedFilters: backtest.appliedFilters ?? [],
+    filterStats: backtest.filterStats ?? null,
     setupBreakdown: backtest.setupBreakdown,
     recentTradesSample: backtest.trades.slice(0, 18).map((t) => ({
       side: t.side,
