@@ -131,20 +131,34 @@ export function evaluateSignalEntryTiming(params: {
       ? price > Math.max(zone.high, entryRef) + riskDist * 0.35
       : price < Math.min(zone.low, entryRef) - riskDist * 0.35;
 
+    const pushingWrongSideOfEntry = isBuy
+      ? price < entryRef - riskDist * (formingCandle ? 0.06 : 0.1) &&
+        (!formingCandle || formingCandle.close <= formingCandle.open)
+      : price > entryRef + riskDist * (formingCandle ? 0.06 : 0.1) &&
+        (!formingCandle || formingCandle.close >= formingCandle.open);
+
     const strongCounterForming =
       formingCandle &&
       (isBuy
         ? formingCandle.close < formingCandle.open &&
-          formingCandle.open - formingCandle.close >= riskDist * 0.4
+          formingCandle.open - formingCandle.close >= riskDist * 0.25
         : formingCandle.close > formingCandle.open &&
-          formingCandle.close - formingCandle.open >= riskDist * 0.4);
+          formingCandle.close - formingCandle.open >= riskDist * 0.25);
 
-    if (stretchedBeyondEntry || strongCounterForming) {
+    if (stretchedBeyondEntry || pushingWrongSideOfEntry || strongCounterForming) {
       return {
         decision: 'WAIT_CANDLE_CLOSE',
         headline: `WAIT FOR ${execTf} CLOSE (${countdown}) — DO NOT FORCE`,
-        detail: strongCounterForming
-          ? `The ${closedLabel} sniper bar confirmed ${plan.signal}, but the forming ${execTf} bar is pulling back hard. Wait ${countdown} for candle close confirmation at ${entryRef.toFixed(
+        detail: pushingWrongSideOfEntry
+          ? `The ${closedLabel} bar flagged ${plan.signal}, but live price (${price.toFixed(
+              d
+            )}) is trading ${isBuy ? 'below' : 'above'} entry (${entryRef.toFixed(
+              d
+            )}). Wait ${countdown} for the ${execTf} candle to close ${
+              isBuy ? 'bullish at/above' : 'bearish at/below'
+            } ${entryRef.toFixed(d)} holding SL ${plan.stopLoss.toFixed(d)}.`
+          : strongCounterForming
+          ? `The ${closedLabel} sniper bar confirmed ${plan.signal}, but the forming ${execTf} bar is pulling back against it. Wait ${countdown} for candle close confirmation near ${entryRef.toFixed(
               d
             )}.`
           : `Live price (${price.toFixed(
@@ -155,12 +169,12 @@ export function evaluateSignalEntryTiming(params: {
               d
             )}–${zone.high.toFixed(d)}.`,
         closeCondition: isBuy
-          ? `Enter only if ${execTf} closes bullish near ${zone.low.toFixed(
+          ? `Enter only if ${execTf} closes bullish at/above ${entryRef.toFixed(
               d
-            )}–${zone.high.toFixed(d)} above ${plan.stopLoss.toFixed(d)}`
-          : `Enter only if ${execTf} closes bearish near ${zone.low.toFixed(
+            )} holding SL ${plan.stopLoss.toFixed(d)}`
+          : `Enter only if ${execTf} closes bearish at/below ${entryRef.toFixed(
               d
-            )}–${zone.high.toFixed(d)} below ${plan.stopLoss.toFixed(d)}`,
+            )} holding SL ${plan.stopLoss.toFixed(d)}`,
         candleCloseTime: progress.nextCloseSec,
         candleTimeframe: execTf,
       };

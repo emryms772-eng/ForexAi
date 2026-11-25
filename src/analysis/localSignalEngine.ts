@@ -257,6 +257,20 @@ export function generateLocalMtfSignal(params: {
     bearConfirmations.push(`5M ${m5Snap.latestStructureEvent} confirmed`);
   }
 
+  const closedBarRange = lastClosed
+    ? Math.max(lastClosed.high - lastClosed.low, 1e-9)
+    : 1;
+  const bullClosedBar = Boolean(
+    lastClosed &&
+      lastClosed.close > lastClosed.open &&
+      (lastClosed.close - lastClosed.low) / closedBarRange >= 0.45
+  );
+  const bearClosedBar = Boolean(
+    lastClosed &&
+      lastClosed.close < lastClosed.open &&
+      (lastClosed.high - lastClosed.close) / closedBarRange >= 0.45
+  );
+
   // Strict OTE Discount / Premium Zones for Sniper Entries Only
   const inSniperDiscount =
     m5Snap.rangePositionPct <= 40 ||
@@ -266,11 +280,13 @@ export function generateLocalMtfSignal(params: {
     Boolean(nearBearZone && m5Snap.rangePositionPct >= 56);
 
   const bullSniperTrigger =
+    bullClosedBar &&
     (bullSweepConfirmed || Boolean(nearBullZone)) &&
     (bullDisplacement || hasBullPattern) &&
     bullConfirmations.length >= 3;
 
   const bearSniperTrigger =
+    bearClosedBar &&
     (bearSweepConfirmed || Boolean(nearBearZone)) &&
     (bearDisplacement || hasBearPattern) &&
     bearConfirmations.length >= 3;
@@ -531,7 +547,12 @@ export function enforceSniperDiscipline(params: {
   const d = getInstrumentBySymbol(signal.symbol).decimals;
   const a4h = byTf.get('4H') ? assessTimeframe(byTf.get('4H')!, d) : null;
   const a1h = byTf.get('1H') ? assessTimeframe(byTf.get('1H')!, d) : null;
-  const m5Snap = byTf.get('5M')?.analysis.snapshot;
+  const m5Entry = byTf.get('5M');
+  const m5Closed = m5Entry
+    ? getClosedCandlesForTimeframe(m5Entry.candles, '5M')
+    : [];
+  const lastClosedM5 = m5Closed[m5Closed.length - 1];
+  const m5Snap = m5Entry?.analysis.snapshot;
 
   const htfOpposes =
     (isBuy && (a4h?.bias === 'Bearish' || a1h?.bias === 'Bearish')) ||
@@ -542,10 +563,22 @@ export function enforceSniperDiscipline(params: {
     ((isBuy && m5Snap.rangePositionPct > 50) ||
       (!isBuy && m5Snap.rangePositionPct < 50));
 
+  const wrongCandleDirection =
+    lastClosedM5 &&
+    ((isBuy && lastClosedM5.close <= lastClosedM5.open) ||
+      (!isBuy && lastClosedM5.close >= lastClosedM5.open));
+
   const weakQuality =
     plan.signalStrength !== 'A+ Setup' || plan.confluences.length < 3;
 
-  if (!validGeometry || rr < 2.2 || htfOpposes || wrongSideOfRange || weakQuality) {
+  if (
+    !validGeometry ||
+    rr < 2.2 ||
+    htfOpposes ||
+    wrongSideOfRange ||
+    wrongCandleDirection ||
+    weakQuality
+  ) {
     const localStrict = generateLocalMtfSignal({
       symbol: signal.symbol,
       activeTimeframe: signal.timeframe,
