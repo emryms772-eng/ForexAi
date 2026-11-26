@@ -296,7 +296,7 @@ export async function sendNtfySignalAlert(
     topic: validTopic,
     title,
     message,
-    priority: isBuy || isSell ? 'high' : 'default',
+    priority: isBuy || isSell ? 'urgent' : 'high',
     tags,
   });
 
@@ -351,7 +351,7 @@ export async function sendNtfyMarketScanDigest(
     topic: validTopic,
     title: `5M Scan (${barUtc}): Stay Flat · Closest Watch`,
     message,
-    priority: 'default',
+    priority: 'high',
     tags: ['mag', 'hourglass_flowing_sand'],
   });
 
