@@ -3,9 +3,11 @@ import type {
   AIBacktestReview,
   AIPriceActionSignal,
   BacktestResult,
+  GoldProtocolAnalysis,
   Timeframe,
   TimeframeAlignmentItem,
 } from '../types/market.ts';
+import { analyzeGoldProtocol } from './goldProtocol.ts';
 import type { TimeframePriceActionInput } from './mtfPrompt.ts';
 import {
   extractHistoricalPriceActionTimeline,
@@ -158,6 +160,17 @@ export function generateLocalMtfSignal(params: {
   const m5Snap = m5Entry.analysis.snapshot;
   const avgRange = Math.max(m5Snap.avgCandleRange, spotPrice * 0.0005);
 
+  let goldProtocol: GoldProtocolAnalysis | undefined;
+  if (instrument.symbol === 'XAU/USD') {
+    const h1Entry = byTf.get('1H') ?? m5Entry;
+    goldProtocol = analyzeGoldProtocol({
+      h1Candles: h1Entry.candles,
+      ltfCandles: m5Entry.candles,
+      ltfTimeframe: m5Entry.timeframe,
+      h1Summary: h1Entry.timeframe === '1H' ? h1Entry.analysis : undefined,
+    });
+  }
+
   // Strict 4H / 1H / 15M higher-timeframe consensus (zero conflict allowed for Sniper entries)
   let htfBull = 0;
   let htfBear = 0;
@@ -279,17 +292,90 @@ export function generateLocalMtfSignal(params: {
     m5Snap.rangePositionPct >= 60 ||
     Boolean(nearBearZone && m5Snap.rangePositionPct >= 56);
 
+  // Gold (XAU/USD) 3-Phase Protocol confluence checks (3rd-touch trendline, 50-pt psych + Fib, body close & volatility filter)
+  const goldThirdTouchBull = Boolean(
+    goldProtocol?.trendlines.some(
+      (t) => t.direction === 'Support (Bullish)' && t.thirdTouchActive
+    )
+  );
+  const goldThirdTouchBear = Boolean(
+    goldProtocol?.trendlines.some(
+      (t) => t.direction === 'Resistance (Bearish)' && t.thirdTouchActive
+    )
+  );
+  const goldFibOverlap = goldProtocol?.fibConfluences.find(
+    (f) => f.overlapsWith.length > 0 && f.distancePips <= 120
+  );
+  const goldNearBelowPsych = Boolean(
+    goldProtocol && goldProtocol.psychologicalLevels.nearestBelow.distancePips <= 75
+  );
+  const goldNearAbovePsych = Boolean(
+    goldProtocol && goldProtocol.psychologicalLevels.nearestAbove.distancePips <= 75
+  );
+  const goldWickOnlyBlock =
+    goldProtocol?.closureConfirmation.status === 'Wick Rejection Only';
+  const goldVolatilityCaution =
+    goldProtocol?.volatilityFilter.status === 'Elevated Fakeout Risk';
+
+  if (goldProtocol) {
+    if (goldThirdTouchBull) {
+      bullConfirmations.push('Gold H1 3rd-touch bullish trendline + body hold');
+    }
+    if (goldThirdTouchBear) {
+      bearConfirmations.push('Gold H1 3rd-touch bearish trendline + body hold');
+    }
+    if (goldFibOverlap) {
+      const fibMsg = `${goldFibOverlap.ratio} Fib @ ${goldFibOverlap.price.toFixed(2)} overlapping ${goldFibOverlap.overlapsWith[0]}`;
+      if (goldProtocol.h1Bias !== 'Bearish') bullConfirmations.push(fibMsg);
+      if (goldProtocol.h1Bias !== 'Bullish') bearConfirmations.push(fibMsg);
+    }
+    if (goldNearBelowPsych) {
+      bullConfirmations.push(
+        `Near ${goldProtocol.psychologicalLevels.nearestBelow.price} psychological support (-${goldProtocol.psychologicalLevels.nearestBelow.distancePips} pips)`
+      );
+    }
+    if (goldNearAbovePsych) {
+      bearConfirmations.push(
+        `Near ${goldProtocol.psychologicalLevels.nearestAbove.price} psychological resistance (+${goldProtocol.psychologicalLevels.nearestAbove.distancePips} pips)`
+      );
+    }
+  }
+
+  const bullGoldConfluenceTrigger = Boolean(
+    goldProtocol &&
+      !goldVolatilityCaution &&
+      !goldWickOnlyBlock &&
+      goldProtocol.h1Bias === 'Bullish' &&
+      bullClosedBar &&
+      (goldThirdTouchBull || (goldFibOverlap && goldNearBelowPsych)) &&
+      bullConfirmations.length >= 3
+  );
+
+  const bearGoldConfluenceTrigger = Boolean(
+    goldProtocol &&
+      !goldVolatilityCaution &&
+      !goldWickOnlyBlock &&
+      goldProtocol.h1Bias === 'Bearish' &&
+      bearClosedBar &&
+      (goldThirdTouchBear || (goldFibOverlap && goldNearAbovePsych)) &&
+      bearConfirmations.length >= 3
+  );
+
   const bullSniperTrigger =
     bullClosedBar &&
-    (bullSweepConfirmed || Boolean(nearBullZone)) &&
-    (bullDisplacement || hasBullPattern) &&
-    bullConfirmations.length >= 3;
+    !goldVolatilityCaution &&
+    ((bullSweepConfirmed || Boolean(nearBullZone)) &&
+      (bullDisplacement || hasBullPattern) &&
+      bullConfirmations.length >= 3 ||
+      bullGoldConfluenceTrigger);
 
   const bearSniperTrigger =
     bearClosedBar &&
-    (bearSweepConfirmed || Boolean(nearBearZone)) &&
-    (bearDisplacement || hasBearPattern) &&
-    bearConfirmations.length >= 3;
+    !goldVolatilityCaution &&
+    ((bearSweepConfirmed || Boolean(nearBearZone)) &&
+      (bearDisplacement || hasBearPattern) &&
+      bearConfirmations.length >= 3 ||
+      bearGoldConfluenceTrigger);
 
   let signalAction: 'BUY' | 'SELL' | 'WAIT' = 'WAIT';
   let signalStrength: 'A+ Setup' | 'Standard' | 'Developing' = 'Developing';
@@ -305,11 +391,15 @@ export function generateLocalMtfSignal(params: {
   ) {
     signalAction = 'BUY';
     signalStrength = 'A+ Setup';
-    setupType = nearBullZone
+    setupType = bullGoldConfluenceTrigger
+      ? `XAU/USD 3-Phase H1 Confluence (${goldThirdTouchBull ? '3rd-Touch Trendline' : 'Fib + 50-Pt Psych'})`
+      : nearBullZone
       ? `Sniper HTF Bullish + 5M ${nearBullZone.kind} Mitigation`
       : 'Sniper HTF Bullish + 5M Sell-Side Sweep Displacement';
     triggerPattern = hasBullPattern && latestPattern
       ? latestPattern.name
+      : bullGoldConfluenceTrigger
+      ? 'Closed-Bar Body Confirmation at Gold Confluence'
       : '5M Sweep + Bullish Displacement BOS';
     confluences = [
       `4H/1H/15M HTF consensus (${a4h?.bias ?? 'Neutral'} / ${a1h?.bias ?? 'Neutral'} / ${a15m?.bias ?? 'Neutral'})`,
@@ -324,11 +414,15 @@ export function generateLocalMtfSignal(params: {
   ) {
     signalAction = 'SELL';
     signalStrength = 'A+ Setup';
-    setupType = nearBearZone
+    setupType = bearGoldConfluenceTrigger
+      ? `XAU/USD 3-Phase H1 Confluence (${goldThirdTouchBear ? '3rd-Touch Trendline' : 'Fib + 50-Pt Psych'})`
+      : nearBearZone
       ? `Sniper HTF Bearish + 5M ${nearBearZone.kind} Mitigation`
       : 'Sniper HTF Bearish + 5M Buy-Side Sweep Displacement';
     triggerPattern = hasBearPattern && latestPattern
       ? latestPattern.name
+      : bearGoldConfluenceTrigger
+      ? 'Closed-Bar Body Confirmation at Gold Confluence'
       : '5M Sweep + Bearish Displacement BOS';
     confluences = [
       `4H/1H/15M HTF consensus (${a4h?.bias ?? 'Neutral'} / ${a1h?.bias ?? 'Neutral'} / ${a15m?.bias ?? 'Neutral'})`,
@@ -337,14 +431,18 @@ export function generateLocalMtfSignal(params: {
     ];
   } else {
     const isBullWatch = dominantBias !== 'Bearish';
-    setupType = htfConflict
+    setupType = goldVolatilityCaution
+      ? 'WAIT — Gold Volatility Spike / Fakeout Risk'
+      : htfConflict
       ? 'WAIT — HTF Conflict (No Sniper)'
       : dominantBias === 'Neutral'
       ? 'WAIT — Neutral HTF (Stay Flat)'
       : isBullWatch
       ? 'WAIT — Watch 5M Deep Discount Sniper Zone'
       : 'WAIT — Watch 5M Deep Premium Sniper Zone';
-    triggerPattern = isBullWatch
+    triggerPattern = goldVolatilityCaution
+      ? 'Require extra closed-bar body confirmation after abnormal volatility/gap'
+      : isBullWatch
       ? 'Need closed 5M sell-side sweep + displacement in Discount (<=40%)'
       : 'Need closed 5M buy-side sweep + displacement in Premium (>=60%)';
     confluences = [
@@ -512,6 +610,7 @@ export function generateLocalMtfSignal(params: {
       invalidationReason,
       confluences: confluences.slice(0, 4),
     },
+    ...(goldProtocol ? { goldProtocol } : {}),
   };
 }
 
@@ -524,8 +623,23 @@ export function enforceSniperDiscipline(params: {
   timeframesData: TimeframePriceActionInput[];
 }): AIPriceActionSignal {
   const { signal, timeframesData } = params;
+  const byTfAll = new Map(timeframesData.map((t) => [t.timeframe, t]));
+  let goldProtocol = signal.goldProtocol;
+  if (signal.symbol === 'XAU/USD' && !goldProtocol) {
+    const m5 = byTfAll.get('5M') ?? timeframesData[0];
+    const h1 = byTfAll.get('1H') ?? m5;
+    if (m5 && h1) {
+      goldProtocol = analyzeGoldProtocol({
+        h1Candles: h1.candles,
+        ltfCandles: m5.candles,
+        ltfTimeframe: m5.timeframe,
+        h1Summary: h1.timeframe === '1H' ? h1.analysis : undefined,
+      });
+    }
+  }
+
   if (signal.plan.signal === 'WAIT') {
-    return signal;
+    return goldProtocol ? { ...signal, goldProtocol } : signal;
   }
 
   const { plan } = signal;
@@ -596,7 +710,7 @@ export function enforceSniperDiscipline(params: {
     };
   }
 
-  return signal;
+  return goldProtocol ? { ...signal, goldProtocol } : signal;
 }
 
 /**

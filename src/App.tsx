@@ -985,7 +985,7 @@ export default function App() {
           timeframe,
           riskPercentPerTrade: demoAccount.config.riskPercentPerTrade,
           includeAiReview,
-          candles: candlesRef.current.length >= 260 ? candlesRef.current : undefined,
+          candles: candlesRef.current.length >= 2000 ? candlesRef.current : undefined,
         });
         setBacktestResult(res.backtest);
         setAiBacktestReview(res.aiReview);

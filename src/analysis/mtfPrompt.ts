@@ -8,6 +8,7 @@ import type {
   Timeframe,
   TimeframeAlignmentItem,
 } from '../types/market.ts';
+import { analyzeGoldProtocol } from './goldProtocol.ts';
 import {
   extractHistoricalPriceActionTimeline,
   getClosedCandlesForTimeframe,
@@ -189,6 +190,18 @@ export function buildMtfSignalPrompt(params: {
     };
   });
 
+  const h1Entry =
+    timeframesData.find((t) => t.timeframe === '1H') ?? m5Entry;
+  const goldProtocol =
+    instrument.symbol === 'XAU/USD'
+      ? analyzeGoldProtocol({
+          h1Candles: h1Entry.candles,
+          ltfCandles: m5Entry.candles,
+          ltfTimeframe: m5Entry.timeframe,
+          h1Summary: h1Entry.timeframe === '1H' ? h1Entry.analysis : undefined,
+        })
+      : null;
+
   const payloadJson = JSON.stringify({
     instrument: {
       symbol: instrument.symbol,
@@ -200,13 +213,19 @@ export function buildMtfSignalPrompt(params: {
     executionTimeframe: '5M',
     nonRepaintingClosedBarsOnly: true,
     lastClosedPrice: currentPrice,
+    ...(goldProtocol ? { goldProtocol3Phase: goldProtocol } : {}),
     multiTimeframePriceAction: multiTimeframeContext,
   });
+
+  const goldRules = goldProtocol
+    ? 'XAU/USD 3-PHASE PROTOCOL: Anchor primary directional bias on H1; respect UTC Daily Session Breaks, open gaps, and 50-point (500-pip) psychological levels; classify the active daily scenario (Sideways consolidation, Clean uptrend/downtrend, Initial drop -> bullish reversal, Initial rally -> bearish reversal); prioritize 3rd-touch inception trendline + Fibonacci confluence; distinguish wick rejections vs solid candle body closures (never confirm breakouts on wicks alone); and respect macro/geopolitical volatility spike warnings.'
+    : '';
 
   const systemInstruction = [
     'You are an institutional top-down multi-timeframe pure price-action analyst operating strictly on CLOSED, NON-REPAINTING candles. SNIPER ENTRIES ONLY — ZERO SECOND-GUESSING.',
     'All data provided uses closed bars only (no unclosed forming candles). Never guess or extrapolate unclosed candle movement.',
     'THOROUGH MARKET READ: Carefully synthesize ALL price-action evidence across ALL 5 timeframes (4H, 1H, 15M, 5M, 1M): chronological swing progression (HH/HL/LH/LL), BOS/CHoCH structural shifts, earlier-vs-recent session shifts, unswept Equal Highs/Lows (EQH/EQL liquidity magnets), liquidity sweeps, high-volume displacement bursts, unmitigated Order Blocks & Fair Value Gaps, S/R clusters, buyer/seller pressure, and candlestick rejection/engulfing triggers.',
+    ...(goldRules ? [goldRules] : []),
     'EXECUTION RULE: Execution is ALWAYS strictly on the 5M timeframe. Set signalTimeframe to "5M". All entryPrice, entryZone, stopLoss, takeProfit1, and takeProfit2 levels MUST be calibrated for 5M execution.',
     'MANDATORY SNIPER QUALITY GATES: NEVER issue Standard/mediocre trades. Output BUY or SELL ONLY as an "A+ Setup" when ALL FOUR Sniper Gates pass on closed bars: (1) Zero conflict across 4H & 1H (and 15M must not oppose); (2) 5M price sits in OTE Deep Discount (<= 40%) for BUY or OTE Deep Premium (>= 60%) for SELL mitigating a 5M Order Block or Fair Value Gap; (3) Confirmed closed-bar liquidity sweep + strong 5M displacement expansion + >=3 confluences; (4) Minimum Risk-to-Reward >= 1:2.5.',
     'WHEN TO WAIT: If ANY of the 4 Sniper Gates fails, you MUST output signal "WAIT" with zero hesitation. Clearly state why to stay flat, what exact 5M closed-bar sniper trigger confirms entry, and populate conditional watch levels (entryPrice at the key 5M sniper OTE zone, stopLoss behind structure, takeProfit1/takeProfit2 at EQH/EQL liquidity targets).',

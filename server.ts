@@ -13,6 +13,7 @@ import {
 } from './src/server/aiAnalysis.ts';
 import {
   advanceMarketTick,
+  getDeepMarketCandles,
   getMarketCandles,
   getWatchlistQuotes,
 } from './src/server/marketData.ts';
@@ -258,16 +259,23 @@ async function startServer() {
         ? (req.body.candles as OHLCVCandle[])
         : [];
 
+      const ltfTargetBars =
+        timeframe === '4H'
+          ? 3500
+          : timeframe === '15M'
+          ? 5800
+          : 11000;
+
       const [ltfData, h1Data, h4Data] = await Promise.all([
-        clientCandles.length >= 260
+        clientCandles.length >= 2000
           ? Promise.resolve(null)
-          : getMarketCandles(instrument.symbol, timeframe, 420),
-        getMarketCandles(instrument.symbol, '1H', 220),
-        getMarketCandles(instrument.symbol, '4H', 160),
+          : getDeepMarketCandles(instrument.symbol, timeframe, ltfTargetBars),
+        getDeepMarketCandles(instrument.symbol, '1H', 11000),
+        getDeepMarketCandles(instrument.symbol, '4H', 3500),
       ]);
 
       const candles =
-        clientCandles.length >= 260 ? clientCandles : ltfData!.candles;
+        clientCandles.length >= 2000 ? clientCandles : ltfData!.candles;
       const htfAligned =
         h1Data.source === 'live-api' &&
         h4Data.source === 'live-api' &&

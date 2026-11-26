@@ -157,6 +157,86 @@ export interface SignalEntryTiming {
   candleTimeframe: Timeframe;
 }
 
+export interface GoldPsychologicalLevel {
+  price: number;
+  relation: 'Above' | 'Below' | 'At Spot';
+  distancePoints: number;
+  distancePips: number;
+}
+
+export type GoldDailyScenario =
+  | 'Sideways consolidation'
+  | 'Clean downtrend'
+  | 'Clean uptrend'
+  | 'Initial drop followed by a bullish reversal'
+  | 'Initial rally followed by a bearish reversal';
+
+export interface GoldTrendlineRead {
+  direction: 'Support (Bullish)' | 'Resistance (Bearish)';
+  inceptionTime: number;
+  inceptionPrice: number;
+  anchorTime: number;
+  anchorPrice: number;
+  projectedPriceAtSpot: number;
+  touches: number;
+  thirdTouchActive: boolean;
+  bodyBreakStatus: 'Intact' | 'Wick Spike Rejected' | 'Body Close Broken';
+}
+
+export interface GoldFibConfluence {
+  ratio: '0.382' | '0.500' | '0.618' | '0.786';
+  price: number;
+  distancePips: number;
+  overlapsWith: string[];
+}
+
+export interface GoldProtocolAnalysis {
+  primaryTimeframe: '1H';
+  h1Bias: 'Bullish' | 'Bearish' | 'Neutral';
+  h1Structure: string;
+  h1StructureEvent: string;
+  chochStatus: string;
+  dailyScenario: GoldDailyScenario;
+  dailySession: {
+    sessionDateUtc: string;
+    sessionStartSec: number;
+    sessionOpen: number;
+    sessionHigh: number;
+    sessionLow: number;
+    prevDayClose: number;
+    openGapPoints: number;
+    openGapPips: number;
+    dailyRangePoints: number;
+    avgDailyRangePoints: number;
+    rangeExpansionRatio: number;
+  };
+  psychologicalLevels: {
+    incrementPoints: 50;
+    incrementPips: 500;
+    nearestBelow: GoldPsychologicalLevel;
+    nearestAbove: GoldPsychologicalLevel;
+    nearbyLevels: GoldPsychologicalLevel[];
+  };
+  trendlines: GoldTrendlineRead[];
+  fibConfluences: GoldFibConfluence[];
+  closureConfirmation: {
+    status: 'Body Close Confirmed' | 'Wick Rejection Only' | 'Awaiting Close';
+    detail: string;
+  };
+  volatilityFilter: {
+    status: 'Normal' | 'Elevated Fakeout Risk';
+    spikeRatio: number;
+    openGapAlert: boolean;
+    warning: string;
+  };
+  sections: {
+    currentBiasAndScenario: string;
+    keyLevelsAndConfluence: string;
+    confirmationStatus: string;
+    riskAndVolatilityWarning: string;
+  };
+}
+
 export interface AIPriceActionSignal {
   id: string;
   symbol: string;
@@ -173,6 +253,7 @@ export interface AIPriceActionSignal {
   keyZonesExplanation: string;
   timeframeAlignment: TimeframeAlignmentItem[];
   plan: PriceActionSignalPlan;
+  goldProtocol?: GoldProtocolAnalysis;
 }
 
 export type AutoScanIntervalSec = 0 | 60 | 180 | 300;

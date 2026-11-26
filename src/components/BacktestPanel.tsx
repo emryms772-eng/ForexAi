@@ -200,11 +200,14 @@ export function BacktestPanel({
             </span>
           </div>
           <p className="text-xs text-slate-400">
-            Tests {symbol} ({timeframe}) at{' '}
+            Tests {symbol} ({timeframe}) across deep multi-thousand-bar history at{' '}
             <span className="font-mono tabular-nums text-slate-300">
               {riskPercentPerTrade}%
             </span>{' '}
-            risk per trade with 1H/4H structural bias alignment, deep discount/premium pricing, and post-sweep displacement confirmation.
+            risk per trade with{' '}
+            {symbol === 'XAU/USD'
+              ? 'H1 anchor bias, 50-pt psychological levels, Fib & 3rd-touch trendline confluence, and candle body-close filters.'
+              : '1H/4H structural bias alignment, deep discount/premium pricing, and post-sweep displacement confirmation.'}
           </p>
         </div>
 

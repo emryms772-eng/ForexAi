@@ -1,7 +1,7 @@
 import { runNonRepaintingBacktest } from '../../src/analysis/backtester.ts';
 import { TIMEFRAMES, getInstrumentBySymbol } from '../../src/config/instruments.ts';
 import { generateBacktestReview } from '../../src/server/aiAnalysis.ts';
-import { getMarketCandles } from '../../src/server/marketData.ts';
+import { getDeepMarketCandles } from '../../src/server/marketData.ts';
 import type {
   AIBacktestReview,
   OHLCVCandle,
@@ -57,16 +57,23 @@ export default async function handler(
       ? (body.candles as OHLCVCandle[])
       : [];
 
+    const ltfTargetBars =
+      timeframe === '4H'
+        ? 3500
+        : timeframe === '15M'
+        ? 5800
+        : 11000;
+
     const [ltfData, h1Data, h4Data] = await Promise.all([
-      clientCandles.length >= 260
+      clientCandles.length >= 2000
         ? Promise.resolve(null)
-        : getMarketCandles(instrument.symbol, timeframe, 420),
-      getMarketCandles(instrument.symbol, '1H', 220),
-      getMarketCandles(instrument.symbol, '4H', 160),
+        : getDeepMarketCandles(instrument.symbol, timeframe, ltfTargetBars),
+      getDeepMarketCandles(instrument.symbol, '1H', 11000),
+      getDeepMarketCandles(instrument.symbol, '4H', 3500),
     ]);
 
     const candles =
-      clientCandles.length >= 260 ? clientCandles : ltfData!.candles;
+      clientCandles.length >= 2000 ? clientCandles : ltfData!.candles;
     const htfAligned =
       h1Data.source === 'live-api' &&
       h4Data.source === 'live-api' &&

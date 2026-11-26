@@ -477,6 +477,75 @@ export function AIAnalysisCard({
               </p>
             </div>
 
+            {/* XAU/USD 3-Phase Gold Protocol Structured Output */}
+            {signal.symbol === 'XAU/USD' && signal.goldProtocol && (
+              <div className="rounded-md border border-amber-500/30 bg-[#0B0F17] p-3.5 space-y-2.5 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/80 pb-2">
+                  <span className="font-semibold text-amber-300">
+                    XAU/USD 3-Phase Protocol (H1 Anchor)
+                  </span>
+                  <span className="font-mono tabular-nums text-[11px] text-slate-300">
+                    {signal.goldProtocol.psychologicalLevels.nearestBelow.price} (-
+                    {signal.goldProtocol.psychologicalLevels.nearestBelow.distancePips}p) ·{' '}
+                    {signal.goldProtocol.psychologicalLevels.nearestAbove.price} (+
+                    {signal.goldProtocol.psychologicalLevels.nearestAbove.distancePips}p)
+                  </span>
+                </div>
+
+                <div className="space-y-2 leading-relaxed">
+                  <div>
+                    <div className="font-semibold text-slate-200">
+                      1. Current Bias &amp; Daily Scenario
+                    </div>
+                    <p className="text-slate-300 mt-0.5">
+                      {signal.goldProtocol.sections.currentBiasAndScenario}
+                    </p>
+                  </div>
+
+                  <div>
+                    <div className="font-semibold text-slate-200">
+                      2. Key Levels &amp; Confluence
+                    </div>
+                    <p className="text-slate-300 mt-0.5">
+                      {signal.goldProtocol.sections.keyLevelsAndConfluence}
+                    </p>
+                  </div>
+
+                  <div>
+                    <div className="font-semibold text-slate-200">
+                      3. Confirmation Status
+                    </div>
+                    <p className="text-slate-300 mt-0.5">
+                      {signal.goldProtocol.sections.confirmationStatus}
+                    </p>
+                  </div>
+
+                  <div>
+                    <div
+                      className={`font-semibold ${
+                        signal.goldProtocol.volatilityFilter.status ===
+                        'Elevated Fakeout Risk'
+                          ? 'text-amber-300'
+                          : 'text-slate-200'
+                      }`}
+                    >
+                      4. Risk &amp; Volatility Warning
+                    </div>
+                    <p
+                      className={`mt-0.5 ${
+                        signal.goldProtocol.volatilityFilter.status ===
+                        'Elevated Fakeout Risk'
+                          ? 'text-amber-200/90'
+                          : 'text-slate-300'
+                      }`}
+                    >
+                      {signal.goldProtocol.sections.riskAndVolatilityWarning}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Collapsible Detailed MTF Breakdown */}
             <div className="border-t border-slate-800/80 pt-2">
               <button

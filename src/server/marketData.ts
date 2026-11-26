@@ -40,6 +40,10 @@ interface LiveBrokerQuote {
 }
 
 const seriesCache = new Map<string, SeriesState>();
+const deepSeriesCache = new Map<
+  string,
+  { fetchedAt: number; data: MarketCandlesResponse }
+>();
 const brokerQuoteCache = new Map<string, LiveBrokerQuote>();
 let lastScannerBatchAt = 0;
 let scannerInflight: Promise<void> | null = null;
@@ -209,18 +213,21 @@ function mapTimeframeToBinance(tf: Timeframe): string {
   }
 }
 
-function mapTimeframeToYahoo(tf: Timeframe): { interval: string; range: string } {
+function mapTimeframeToYahoo(
+  tf: Timeframe,
+  deepHistory = false
+): { interval: string; range: string } {
   switch (tf) {
     case '1M':
-      return { interval: '1m', range: '1d' };
+      return { interval: '1m', range: deepHistory ? '7d' : '1d' };
     case '5M':
-      return { interval: '5m', range: '5d' };
+      return { interval: '5m', range: deepHistory ? '60d' : '5d' };
     case '15M':
-      return { interval: '15m', range: '5d' };
+      return { interval: '15m', range: deepHistory ? '60d' : '5d' };
     case '1H':
-      return { interval: '60m', range: '1mo' };
+      return { interval: '60m', range: deepHistory ? '2y' : '1mo' };
     case '4H':
-      return { interval: '60m', range: '3mo' };
+      return { interval: '60m', range: deepHistory ? '2y' : '3mo' };
   }
 }
 
@@ -237,13 +244,13 @@ async function fetchTwelveDataCandles(
   if (!apiKey) return null;
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 3500);
+  const timeout = setTimeout(() => controller.abort(), limit > 500 ? 6500 : 3500);
   try {
     const interval = mapTimeframeToTwelveData(timeframe);
     const url = new URL('https://api.twelvedata.com/time_series');
     url.searchParams.set('symbol', symbol);
     url.searchParams.set('interval', interval);
-    url.searchParams.set('outputsize', String(Math.min(limit, 350)));
+    url.searchParams.set('outputsize', String(Math.min(limit, 5000)));
     url.searchParams.set('timezone', 'UTC');
     url.searchParams.set('apikey', apiKey);
 
@@ -309,9 +316,12 @@ async function fetchOandaTvCandles(
 
   const resolution = mapTimeframeToTvResolution(timeframe);
   const tfSec = TIMEFRAME_SECONDS[timeframe];
+  const requestedBars = Math.min(Math.max(limit, 60), 5000);
+  const timeoutMs = requestedBars > 400 ? 7500 : 4200;
 
   return new Promise<OHLCVCandle[] | null>((resolve) => {
     let settled = false;
+    let bestCandles: OHLCVCandle[] = [];
     const finish = (result: OHLCVCandle[] | null) => {
       if (settled) return;
       settled = true;
@@ -340,7 +350,10 @@ async function fetchOandaTvCandles(
       ws.send(`~m~${body.length}~m~${body}`);
     };
 
-    const timer = setTimeout(() => finish(null), 4200);
+    const timer = setTimeout(
+      () => finish(bestCandles.length >= 20 ? bestCandles.slice(-limit) : null),
+      timeoutMs
+    );
 
     ws.onopen = () => {
       try {
@@ -356,7 +369,7 @@ async function fetchOandaTvCandles(
           's1',
           'sds_sym_1',
           resolution,
-          Math.min(Math.max(limit, 60), 320),
+          requestedBars,
         ]);
       } catch {
         finish(null);
@@ -406,8 +419,16 @@ async function fetchOandaTvCandles(
                   });
                 }
                 const normalized = normalizeAscendingCandles(candles);
-                finish(normalized.length >= 20 ? normalized.slice(-limit) : null);
-                return;
+                if (normalized.length > bestCandles.length) {
+                  bestCandles = normalized;
+                }
+                if (
+                  requestedBars <= 400 ||
+                  bestCandles.length >= Math.floor(requestedBars * 0.8)
+                ) {
+                  finish(bestCandles.length >= 20 ? bestCandles.slice(-limit) : null);
+                  return;
+                }
               }
             }
           } catch {
@@ -416,12 +437,17 @@ async function fetchOandaTvCandles(
         }
       }
 
+      if (raw.includes('series_completed') && bestCandles.length >= 20) {
+        finish(bestCandles.slice(-limit));
+        return;
+      }
+
       if (raw.includes('series_error') || raw.includes('symbol_error')) {
-        finish(null);
+        finish(bestCandles.length >= 20 ? bestCandles.slice(-limit) : null);
       }
     };
 
-    ws.onerror = () => finish(null);
+    ws.onerror = () => finish(bestCandles.length >= 20 ? bestCandles.slice(-limit) : null);
   });
 }
 
@@ -483,34 +509,46 @@ async function fetchBinanceKlines(
   decimals: number
 ): Promise<OHLCVCandle[] | null> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 3200);
+  const timeout = setTimeout(() => controller.abort(), limit > 1000 ? 6000 : 3200);
   try {
     const interval = mapTimeframeToBinance(timeframe);
-    const url = `https://api.binance.com/api/v3/klines?symbol=${encodeURIComponent(
-      binanceSymbol
-    )}&interval=${interval}&limit=${limit}`;
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: { Accept: 'application/json' },
-    });
-    if (!res.ok) return null;
-    const raw = (await res.json()) as unknown[];
-    if (!Array.isArray(raw) || raw.length < 30) return null;
+    const target = Math.min(limit, 4000);
+    const collected: OHLCVCandle[] = [];
+    let endTime: number | undefined;
 
-    const candles: OHLCVCandle[] = [];
-    for (const row of raw) {
-      if (!Array.isArray(row) || row.length < 6) continue;
-      candles.push({
-        time: Math.floor(Number(row[0]) / 1000),
-        open: roundPrice(Number(row[1]), decimals),
-        high: roundPrice(Number(row[2]), decimals),
-        low: roundPrice(Number(row[3]), decimals),
-        close: roundPrice(Number(row[4]), decimals),
-        volume: Math.round(Number(row[5]) * 100) / 100,
+    while (collected.length < target) {
+      const batchLimit = Math.min(1000, target - collected.length);
+      const url = `https://api.binance.com/api/v3/klines?symbol=${encodeURIComponent(
+        binanceSymbol
+      )}&interval=${interval}&limit=${batchLimit}${endTime ? `&endTime=${endTime}` : ''}`;
+      const res = await fetch(url, {
+        signal: controller.signal,
+        headers: { Accept: 'application/json' },
       });
+      if (!res.ok) break;
+      const raw = (await res.json()) as unknown[];
+      if (!Array.isArray(raw) || raw.length === 0) break;
+
+      const batch: OHLCVCandle[] = [];
+      for (const row of raw) {
+        if (!Array.isArray(row) || row.length < 6) continue;
+        batch.push({
+          time: Math.floor(Number(row[0]) / 1000),
+          open: roundPrice(Number(row[1]), decimals),
+          high: roundPrice(Number(row[2]), decimals),
+          low: roundPrice(Number(row[3]), decimals),
+          close: roundPrice(Number(row[4]), decimals),
+          volume: Math.round(Number(row[5]) * 100) / 100,
+        });
+      }
+      if (batch.length === 0) break;
+      collected.unshift(...batch);
+      endTime = batch[0].time * 1000 - 1;
+      if (raw.length < batchLimit) break;
     }
-    const normalized = normalizeAscendingCandles(candles);
-    return normalized.length >= 30 ? normalized : null;
+
+    const normalized = normalizeAscendingCandles(collected);
+    return normalized.length >= 30 ? normalized.slice(-target) : null;
   } catch {
     return null;
   } finally {
@@ -525,9 +563,9 @@ async function fetchYahooChart(
   decimals: number
 ): Promise<OHLCVCandle[] | null> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 3200);
+  const timeout = setTimeout(() => controller.abort(), limit > 400 ? 5500 : 3200);
   try {
-    const { interval, range } = mapTimeframeToYahoo(timeframe);
+    const { interval, range } = mapTimeframeToYahoo(timeframe, limit > 350);
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
       yahooSymbol
     )}?interval=${interval}&range=${range}`;
@@ -1061,6 +1099,106 @@ export async function getMarketCandles(
     sourceLabel: fetched.sourceLabel,
     candles,
   };
+}
+
+/**
+ * Fetches deep multi-thousand-bar historical OHLCV data strictly for causal backtesting
+ * without mutating or slowing down the live chart's 260-bar streaming cache.
+ */
+export async function getDeepMarketCandles(
+  symbol: string,
+  timeframe: Timeframe,
+  targetBars = 11000
+): Promise<MarketCandlesResponse> {
+  const instrument = getInstrumentBySymbol(symbol);
+  const cacheKey = `${instrument.symbol}:${timeframe}:${targetBars}`;
+  const cached = deepSeriesCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < 180_000) {
+    return cached.data;
+  }
+
+  let fetched: { candles: OHLCVCandle[]; source: FeedOrigin; sourceLabel: string } | null = null;
+
+  // For multi-month (>=3500 bar) deep backtests on Metals/FX, prefer Yahoo Finance 60d/2y
+  // so LTF, 1H, and 4H share an identical continuous multi-month / 2-year history.
+  if (
+    targetBars >= 3500 &&
+    (instrument.category === 'Forex' || instrument.symbol === 'XAU/USD')
+  ) {
+    const yahooTicker =
+      instrument.symbol === 'XAU/USD'
+        ? 'GC=F'
+        : YAHOO_FX_TICKERS[instrument.symbol];
+    if (yahooTicker) {
+      const yahooDeep = await fetchYahooChart(
+        yahooTicker,
+        timeframe,
+        targetBars,
+        instrument.decimals
+      );
+      const requiredMin = timeframe === '4H' ? 2000 : 2500;
+      if (yahooDeep && yahooDeep.length >= requiredMin) {
+        fetched = {
+          candles: yahooDeep,
+          source: 'live-api',
+          sourceLabel:
+            instrument.symbol === 'XAU/USD'
+              ? 'Yahoo Finance Deep Gold History'
+              : 'Yahoo Finance Deep FX History',
+        };
+      }
+    }
+  }
+
+  if (!fetched) {
+    fetched = await loadUpstreamCandles(instrument, timeframe, targetBars);
+  }
+
+  if (
+    fetched.candles.length < Math.min(targetBars * 0.75, 5200) &&
+    (instrument.category === 'Forex' || instrument.symbol === 'XAU/USD')
+  ) {
+    const yahooTicker =
+      instrument.symbol === 'XAU/USD'
+        ? 'GC=F'
+        : YAHOO_FX_TICKERS[instrument.symbol];
+    if (yahooTicker) {
+      const yahooDeep = await fetchYahooChart(
+        yahooTicker,
+        timeframe,
+        targetBars,
+        instrument.decimals
+      );
+      if (yahooDeep && yahooDeep.length > fetched.candles.length * 1.15) {
+        fetched = {
+          candles: yahooDeep,
+          source: 'live-api',
+          sourceLabel:
+            instrument.symbol === 'XAU/USD'
+              ? 'Yahoo Finance Deep Gold History'
+              : 'Yahoo Finance Deep FX History',
+        };
+      }
+    }
+  }
+
+  const normalized = normalizeAscendingCandles(fetched.candles);
+  const result: MarketCandlesResponse = {
+    symbol: instrument.symbol,
+    timeframe,
+    decimals: instrument.decimals,
+    source: fetched.source,
+    sourceLabel: fetched.sourceLabel,
+    candles: normalized,
+  };
+
+  if (deepSeriesCache.size > 30) {
+    const oldest = deepSeriesCache.keys().next().value;
+    if (oldest) deepSeriesCache.delete(oldest);
+  }
+  deepSeriesCache.set(cacheKey, { fetchedAt: Date.now(), data: result });
+
+  return result;
 }
 
 export interface TickHint {

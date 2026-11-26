@@ -16,6 +16,7 @@ import { Eye, EyeOff, RotateCcw } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CausalSignalArrow } from '../analysis/backtester';
 import { formatCountdown } from '../analysis/entryTiming';
+import { getGoldPsychologicalLevels } from '../analysis/goldProtocol';
 import { getCandleProgress } from '../analysis/priceAction';
 import { TIMEFRAMES, TIMEFRAME_SECONDS } from '../config/instruments';
 import type {
@@ -452,6 +453,45 @@ export function CandlestickChart({
         });
         priceLinesRef.current.push(eqLine);
       }
+
+      // XAU/USD Phase 1 Key Levels: 50-pt (500-pip) Psychological Levels + UTC Session Open
+      if (symbol === 'XAU/USD' && orderedCandles.length > 0) {
+        const lastCandle = orderedCandles[orderedCandles.length - 1];
+        const psych = getGoldPsychologicalLevels(lastCandle.close);
+        const psychTargets = [
+          psych.nearestBelow,
+          psych.nearestAbove,
+        ];
+        for (const pLvl of psychTargets) {
+          const psychLine = candleSeries.createPriceLine({
+            price: pLvl.price,
+            color: 'rgba(251, 191, 36, 0.65)',
+            lineWidth: 1,
+            lineStyle: LineStyle.LargeDashed,
+            axisLabelVisible: true,
+            title: `${pLvl.price} Psych (${pLvl.relation === 'Above' ? '+' : '-'}${pLvl.distancePips}p)`,
+          });
+          priceLinesRef.current.push(psychLine);
+        }
+
+        const todayPrefix = new Date(lastCandle.time * 1000)
+          .toISOString()
+          .slice(0, 10);
+        const dayOpenBar = orderedCandles.find(
+          (c) => new Date(c.time * 1000).toISOString().slice(0, 10) === todayPrefix
+        );
+        if (dayOpenBar) {
+          const dayOpenLine = candleSeries.createPriceLine({
+            price: dayOpenBar.open,
+            color: 'rgba(167, 139, 250, 0.55)',
+            lineWidth: 1,
+            lineStyle: LineStyle.Dotted,
+            axisLabelVisible: true,
+            title: 'Session Open',
+          });
+          priceLinesRef.current.push(dayOpenLine);
+        }
+      }
     }
 
     if (showZones) {
@@ -581,6 +621,7 @@ export function CandlestickChart({
     priceAction.levels,
     priceAction.zones,
     priceAction.snapshot.equilibriumPrice,
+    orderedCandles,
     activeSignal,
     openPosition,
     symbol,
